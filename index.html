@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <meta name="theme-color" content="#ffffff">
+
+  <title>KOCloud Companion</title>
+
+  <link rel="stylesheet" href="./src/styles/main.css">
+  <script
+    src="https://accounts.google.com/gsi/client"
+    async
+    defer
+  ></script>
+  <script type="module" src="./src/app.js"></script>
+</head>
+
+<body>
+  <main class="app-shell">
+    <header class="app-header">
+      <div>
+        <h1>KOCloud Companion</h1>
+        <p class="subtitle">
+          Add books to your personal KOCloud library.
+        </p>
+      </div>
+
+      <div
+        id="connection-status"
+        class="status-badge"
+        data-state="disconnected"
+      >
+        Google Drive: Not connected
+      </div>
+    </header>
+
+    <section class="card" aria-labelledby="setup-title">
+      <h2 id="setup-title">Google Drive</h2>
+
+      <p class="help-text">
+        Enter the Web OAuth Client ID from the same Google Cloud project
+        used by KOCloud on your KOReader device.
+      </p>
+
+      <label for="google-client-id">Web OAuth Client ID</label>
+      <input
+        id="google-client-id"
+        type="text"
+        inputmode="text"
+        autocomplete="off"
+        placeholder="1234567890-....apps.googleusercontent.com"
+      >
+
+      <div class="button-row">
+        <button id="save-client-id" type="button" class="secondary-button">
+          Save Client ID
+        </button>
+
+        <button id="connect-google" type="button" class="primary-button">
+          Connect Google Drive
+        </button>
+      </div>
+
+      <p id="auth-message" class="message" aria-live="polite"></p>
+    </section>
+
+    <section class="card" aria-labelledby="upload-title">
+      <h2 id="upload-title">Add a book</h2>
+
+      <p class="help-text">
+        Choose one EPUB or PDF. The book is uploaded directly from this
+        browser to your KOCloud Books folder in Google Drive.
+      </p>
+
+      <label class="file-picker" for="book-file">
+        Choose EPUB / PDF
+      </label>
+
+      <input
+        id="book-file"
+        class="visually-hidden"
+        type="file"
+        accept=".epub,.pdf,application/epub+zip,application/pdf"
+        disabled
+      >
+
+      <div id="selected-book" class="selected-book">
+        No book selected.
+      </div>
+
+      <button
+        id="upload-book"
+        type="button"
+        class="primary-button full-width"
+        disabled
+      >
+        Upload book
+      </button>
+
+      <div
+        id="upload-progress"
+        class="progress-region"
+        hidden
+      >
+        <progress id="upload-progress-bar" max="100" value="0"></progress>
+        <span id="upload-progress-text">0%</span>
+      </div>
+
+      <p id="upload-message" class="message" aria-live="polite"></p>
+    </section>
+  </main>
+</body>
+</html>
