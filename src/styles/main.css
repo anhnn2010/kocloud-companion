@@ -686,3 +686,84 @@ progress {
     align-items: end;
   }
 }
+
+
+/* Folder-aware My Books */
+
+.library-navigation {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 14px;
+}
+
+.library-navigation[hidden] {
+  display: none;
+}
+
+.library-path {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.library-folder-item {
+  display: block;
+  padding: 0;
+}
+
+.library-folder-button {
+  display: flex;
+  width: 100%;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 13px 14px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.library-folder-button:hover {
+  background: var(--secondary-bg);
+}
+
+.library-folder-button:focus-visible {
+  outline: 3px solid rgb(31 41 55 / 22%);
+  outline-offset: -3px;
+}
+
+.library-folder-main {
+  display: flex;
+  min-width: 0;
+  gap: 9px;
+  align-items: center;
+}
+
+.library-folder-icon {
+  flex: 0 0 auto;
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
+.library-folder-arrow {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+@media (max-width: 420px) {
+  .library-navigation {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .library-navigation .compact-button {
+    width: auto;
+    align-self: flex-start;
+  }
+}

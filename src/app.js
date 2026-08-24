@@ -52,6 +52,10 @@ const elements = {
   batchProgressText: document.getElementById("batch-progress-text"),
 
   refreshLibrary: document.getElementById("refresh-library"),
+  libraryNavigation:
+    document.getElementById("library-navigation"),
+  libraryBack: document.getElementById("library-back"),
+  libraryPath: document.getElementById("library-path"),
   libraryEmpty: document.getElementById("library-empty"),
   libraryContent: document.getElementById("library-content"),
   librarySummary: document.getElementById("library-summary"),
@@ -65,6 +69,8 @@ const state = {
   uploadTask: null,
   busy: false,
   libraryBooks: [],
+  libraryFolders: [],
+  libraryPath: [],
   libraryLoading: false,
   driveSelection: [],
   driveImporting: false,
@@ -116,6 +122,11 @@ function init() {
   elements.refreshLibrary.addEventListener(
     "click",
     handleRefreshLibrary
+  );
+
+  elements.libraryBack.addEventListener(
+    "click",
+    handleLibraryBack
   );
 
   elements.openDrivePicker.addEventListener(
@@ -551,6 +562,13 @@ async function handleCreateBookFolder() {
       `Created and selected ${getDriveDestinationPath()}.`,
       "success"
     );
+
+    if (
+      getCurrentLibraryFolderId() ===
+      booksFolderId
+    ) {
+      await loadLibrary();
+    }
 
     if (state.driveSelection.length > 0) {
       await refreshDriveImportDuplicateStates();
@@ -1180,7 +1198,8 @@ async function handleImportDriveBooks() {
         importedCount > 0 ||
         replacedCount > 0
       ) &&
-      !state.driveDestinationId
+      getCurrentLibraryFolderId() ===
+        destinationFolderId
     ) {
       await loadLibrary();
     }
@@ -1300,7 +1319,7 @@ function formatDriveBookType(mimeType) {
 }
 
 /**
- * Refresh the read-only KOCloud library view.
+ * Refresh the current KOCloud library folder.
  */
 async function handleRefreshLibrary() {
   if (state.busy || state.libraryLoading) {
@@ -1311,7 +1330,53 @@ async function handleRefreshLibrary() {
 }
 
 /**
- * Load books currently visible in KOCloud/Books.
+ * Return the current library folder ID.
+ *
+ * @returns {string}
+ */
+function getCurrentLibraryFolderId() {
+  const current =
+    state.libraryPath[
+      state.libraryPath.length - 1
+    ];
+
+  return (
+    current?.id ||
+    state.storage?.books?.id ||
+    ""
+  );
+}
+
+/**
+ * Ensure My Books starts at the managed Books root.
+ */
+function ensureLibraryRootPath() {
+  const books = state.storage?.books;
+
+  if (!books?.id) {
+    state.libraryPath = [];
+    return;
+  }
+
+  const currentRoot = state.libraryPath[0];
+
+  if (
+    !currentRoot ||
+    currentRoot.id !== books.id
+  ) {
+    state.libraryPath = [
+      {
+        id: books.id,
+        name: books.name || "Books",
+      },
+    ];
+  }
+}
+
+/**
+ * Load direct folders and books in the current My Books location.
+ *
+ * @returns {Promise<boolean>} whether the folder loaded successfully
  */
 async function loadLibrary() {
   const accessToken = googleAuth.getAccessToken();
@@ -1319,35 +1384,122 @@ async function loadLibrary() {
 
   if (!accessToken || !booksFolderId) {
     state.libraryBooks = [];
+    state.libraryFolders = [];
+    state.libraryPath = [];
     renderLibrary();
-    return;
+    return false;
   }
+
+  ensureLibraryRootPath();
+
+  const currentFolderId =
+    getCurrentLibraryFolderId();
 
   state.libraryLoading = true;
   updateLibraryControls();
   clearMessage(elements.libraryMessage);
 
   try {
-    const books =
-      await googleDriveApi.listManagedBooks(
-        accessToken,
-        booksFolderId
-      );
+    const [folders, books] =
+      await Promise.all([
+        googleDriveApi.listChildFolders(
+          accessToken,
+          currentFolderId
+        ),
+        googleDriveApi.listManagedBooks(
+          accessToken,
+          currentFolderId
+        ),
+      ]);
 
+    folders.sort(compareLibraryFolders);
     books.sort(compareLibraryBooks);
 
+    state.libraryFolders = folders;
     state.libraryBooks = books;
     renderLibrary();
+
+    return true;
   } catch (error) {
     setMessage(
       elements.libraryMessage,
       `Could not load library: ${getErrorMessage(error)}`,
       "error"
     );
+
+    return false;
   } finally {
     state.libraryLoading = false;
     updateLibraryControls();
   }
+}
+
+/**
+ * Open one child folder in My Books.
+ *
+ * @param {object} folder
+ */
+async function handleOpenLibraryFolder(folder) {
+  if (
+    state.busy ||
+    state.libraryLoading ||
+    !folder?.id
+  ) {
+    return;
+  }
+
+  state.libraryPath.push({
+    id: folder.id,
+    name: folder.name || "Folder",
+  });
+
+  const loaded = await loadLibrary();
+
+  if (!loaded) {
+    state.libraryPath.pop();
+    renderLibraryNavigation();
+  }
+}
+
+/**
+ * Navigate to the parent My Books folder.
+ */
+async function handleLibraryBack() {
+  if (
+    state.busy ||
+    state.libraryLoading ||
+    state.libraryPath.length <= 1
+  ) {
+    return;
+  }
+
+  const removedFolder =
+    state.libraryPath.pop();
+
+  const loaded = await loadLibrary();
+
+  if (!loaded && removedFolder) {
+    state.libraryPath.push(removedFolder);
+    renderLibraryNavigation();
+  }
+}
+
+/**
+ * Sort library folders by name.
+ *
+ * @param {object} left
+ * @param {object} right
+ * @returns {number}
+ */
+function compareLibraryFolders(left, right) {
+  return String(left.name || "").localeCompare(
+    String(right.name || ""),
+    undefined,
+    {
+      sensitivity: "base",
+      numeric: true,
+    }
+  );
 }
 
 /**
@@ -1379,12 +1531,14 @@ function compareLibraryBooks(left, right) {
 }
 
 /**
- * Render the read-only My Books list.
+ * Render the current KOCloud folder.
  */
 function renderLibrary() {
   const connected =
     googleAuth.isConnected() &&
     Boolean(state.storage?.books?.id);
+
+  renderLibraryNavigation();
 
   if (!connected) {
     elements.libraryEmpty.hidden = false;
@@ -1392,30 +1546,42 @@ function renderLibrary() {
       "Connect Google Drive to load your library.";
     elements.libraryContent.hidden = true;
     elements.libraryList.replaceChildren();
-    elements.librarySummary.textContent = "0 books";
+    elements.librarySummary.textContent =
+      "0 folders · 0 books";
     updateLibraryControls();
     return;
   }
 
+  const folders = state.libraryFolders;
   const books = state.libraryBooks;
+  const totalItems =
+    folders.length + books.length;
 
-  if (books.length === 0) {
+  elements.librarySummary.textContent =
+    formatLibrarySummary(
+      folders.length,
+      books.length
+    );
+
+  elements.libraryList.replaceChildren();
+
+  if (totalItems === 0) {
     elements.libraryEmpty.hidden = false;
     elements.libraryEmpty.textContent =
-      "No books found in KOCloud/Books.";
+      "This folder is empty.";
     elements.libraryContent.hidden = true;
-    elements.libraryList.replaceChildren();
-    elements.librarySummary.textContent = "0 books";
     updateLibraryControls();
     return;
   }
 
   elements.libraryEmpty.hidden = true;
   elements.libraryContent.hidden = false;
-  elements.librarySummary.textContent =
-    `${books.length} book${books.length === 1 ? "" : "s"}`;
 
-  elements.libraryList.replaceChildren();
+  for (const folder of folders) {
+    elements.libraryList.append(
+      createLibraryFolderElement(folder)
+    );
+  }
 
   for (const book of books) {
     elements.libraryList.append(
@@ -1427,14 +1593,136 @@ function renderLibrary() {
 }
 
 /**
- * Create one read-only library row.
+ * Render My Books path and Back control.
+ */
+function renderLibraryNavigation() {
+  const connected =
+    googleAuth.isConnected() &&
+    Boolean(state.storage?.books?.id);
+
+  elements.libraryNavigation.hidden =
+    !connected;
+
+  if (!connected) {
+    elements.libraryPath.textContent =
+      "KOCloud / Books";
+    elements.libraryBack.disabled = true;
+    return;
+  }
+
+  ensureLibraryRootPath();
+
+  const pathNames =
+    state.libraryPath.map(
+      (entry) => entry.name || "Folder"
+    );
+
+  elements.libraryPath.textContent =
+    ["KOCloud", ...pathNames].join(" / ");
+
+  elements.libraryBack.disabled =
+    state.busy ||
+    state.libraryLoading ||
+    state.libraryPath.length <= 1;
+}
+
+/**
+ * Format folder/book counts for the current location.
+ *
+ * @param {number} folderCount
+ * @param {number} bookCount
+ * @returns {string}
+ */
+function formatLibrarySummary(
+  folderCount,
+  bookCount
+) {
+  return (
+    `${folderCount} folder` +
+    `${folderCount === 1 ? "" : "s"} · ` +
+    `${bookCount} book` +
+    `${bookCount === 1 ? "" : "s"}`
+  );
+}
+
+/**
+ * Create one clickable folder row.
+ *
+ * @param {object} folder
+ * @returns {HTMLLIElement}
+ */
+function createLibraryFolderElement(folder) {
+  const li = document.createElement("li");
+  li.className =
+    "library-item library-folder-item";
+
+  const button =
+    document.createElement("button");
+  button.type = "button";
+  button.className =
+    "library-folder-button";
+  button.setAttribute(
+    "aria-label",
+    `Open folder ${folder.name || "Folder"}`
+  );
+
+  const main =
+    document.createElement("span");
+  main.className =
+    "library-folder-main";
+
+  const icon =
+    document.createElement("span");
+  icon.className =
+    "library-folder-icon";
+  icon.setAttribute(
+    "aria-hidden",
+    "true"
+  );
+  icon.textContent = "📁";
+
+  const name =
+    document.createElement("span");
+  name.className =
+    "library-item-name";
+  name.textContent =
+    folder.name || "Untitled folder";
+
+  main.append(icon, name);
+
+  const arrow =
+    document.createElement("span");
+  arrow.className =
+    "library-folder-arrow";
+  arrow.setAttribute(
+    "aria-hidden",
+    "true"
+  );
+  arrow.textContent = "›";
+
+  button.append(main, arrow);
+
+  button.addEventListener(
+    "click",
+    () => {
+      handleOpenLibraryFolder(folder);
+    }
+  );
+
+  li.append(button);
+  return li;
+}
+
+/**
+ * Create one read-only book row.
  *
  * @param {object} book
  * @returns {HTMLLIElement}
  */
 function createLibraryItemElement(book) {
   const li = document.createElement("li");
-  li.className = "library-item";
+  li.className =
+    "library-item library-book-item";
 
   const name = document.createElement("div");
   name.className = "library-item-name";
@@ -1461,19 +1749,26 @@ function createLibraryItemElement(book) {
 }
 
 /**
- * Enable/disable the Library Refresh button.
+ * Enable/disable My Books navigation controls.
  */
 function updateLibraryControls() {
+  const ready =
+    !state.busy &&
+    !state.libraryLoading &&
+    googleAuth.isConnected() &&
+    Boolean(state.storage?.books?.id);
+
   elements.refreshLibrary.disabled =
-    state.busy ||
-    state.libraryLoading ||
-    !googleAuth.isConnected() ||
-    !state.storage?.books?.id;
+    !ready;
 
   elements.refreshLibrary.textContent =
     state.libraryLoading
       ? "Refreshing…"
       : "Refresh";
+
+  elements.libraryBack.disabled =
+    !ready ||
+    state.libraryPath.length <= 1;
 }
 
 /**
@@ -2266,6 +2561,8 @@ function handleAuthEvent(event) {
   if (event.type === "disconnected") {
     state.storage = null;
     state.libraryBooks = [];
+    state.libraryFolders = [];
+    state.libraryPath = [];
     state.driveFolders = [];
     state.driveDestinationId = "";
     state.driveDestinationName = "Books";
@@ -2279,6 +2576,8 @@ function handleAuthEvent(event) {
   if (event.type === "error") {
     state.storage = null;
     state.libraryBooks = [];
+    state.libraryFolders = [];
+    state.libraryPath = [];
     state.driveFolders = [];
     state.driveDestinationId = "";
     state.driveDestinationName = "Books";
@@ -2347,6 +2646,8 @@ function setDisconnectedState() {
 
   state.storage = null;
   state.libraryBooks = [];
+  state.libraryFolders = [];
+  state.libraryPath = [];
   state.driveFolders = [];
   state.driveDestinationId = "";
   state.driveDestinationName = "Books";

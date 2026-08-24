@@ -252,7 +252,7 @@
         <div>
           <h2 id="library-title">My Books</h2>
           <p class="help-text">
-            Books currently available in your KOCloud Books folder.
+            Browse books and folders stored under KOCloud/Books.
           </p>
         </div>
 
@@ -266,13 +266,36 @@
         </button>
       </div>
 
+      <div
+        id="library-navigation"
+        class="library-navigation"
+        hidden
+      >
+        <button
+          id="library-back"
+          type="button"
+          class="secondary-button compact-button"
+          disabled
+        >
+          ← Back
+        </button>
+
+        <div
+          id="library-path"
+          class="library-path"
+          aria-label="Current library folder"
+        >
+          KOCloud / Books
+        </div>
+      </div>
+
       <div id="library-empty" class="library-empty">
         Connect Google Drive to load your library.
       </div>
 
       <div id="library-content" hidden>
         <div id="library-summary" class="library-summary">
-          0 books
+          0 folders · 0 books
         </div>
 
         <ul id="library-list" class="library-list"></ul>
