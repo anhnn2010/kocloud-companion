@@ -278,6 +278,72 @@ export class GoogleDriveApi {
   }
 
   /**
+   * Create a resumable upload session that replaces the content of an
+   * existing Google Drive file.
+   *
+   * The existing file keeps the same Drive file ID and parent folder.
+   * Only its media content is replaced.
+   *
+   * @param {string} accessToken
+   * @param {File} file
+   * @param {string} existingFileId
+   * @returns {Promise<string>} resumable session URL
+   */
+  async createBookReplaceSession(
+    accessToken,
+    file,
+    existingFileId
+  ) {
+    const fields =
+      "id,name,parents,appProperties,size,modifiedTime";
+
+    const params = new URLSearchParams({
+      uploadType: "resumable",
+      fields,
+    });
+
+    const fileId =
+      encodeURIComponent(existingFileId);
+
+    const response = await fetch(
+      `${DRIVE_UPLOAD_URL}/${fileId}?${params}`,
+      {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type":
+            "application/json; charset=UTF-8",
+          "X-Upload-Content-Type":
+            this.getBookMimeType(file),
+          "X-Upload-Content-Length":
+            String(file.size),
+        },
+        // An empty partial metadata update preserves the existing file's
+        // name, parents, and appProperties while replacing only its content.
+        body: JSON.stringify({}),
+      }
+    );
+
+    if (!response.ok) {
+      await throwDriveError(
+        response,
+        "Create resumable replace session"
+      );
+    }
+
+    const sessionUrl =
+      response.headers.get("Location");
+
+    if (!sessionUrl) {
+      throw new Error(
+        "Google Drive did not return a resumable replace URL."
+      );
+    }
+
+    return sessionUrl;
+  }
+
+  /**
    * Return the MIME type KOCloud should use for an ebook.
    *
    * @param {File} file

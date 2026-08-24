@@ -35,7 +35,7 @@ const state = {
 };
 
 /**
- * Initialize KOCloud Companion multi-file upload.
+ * Initialize KOCloud Companion.
  */
 function init() {
   elements.clientId.value = googleAuth.getClientId();
@@ -166,6 +166,10 @@ async function handleConnectGoogle() {
     );
 
     enableBookSelection();
+
+    if (state.queue.length > 0) {
+      await refreshDuplicateStates();
+    }
   } catch (error) {
     state.storage = null;
     disableBookSelection();
@@ -189,9 +193,9 @@ async function handleConnectGoogle() {
 }
 
 /**
- * Add supported selected files to the upload queue.
+ * Add supported selected files to the upload queue and preflight duplicates.
  */
-function handleBookSelection() {
+async function handleBookSelection() {
   clearMessage(elements.uploadMessage);
 
   const files = Array.from(
@@ -217,11 +221,22 @@ function handleBookSelection() {
     state.queue.push(createQueueItem(file));
   }
 
-  // Reset the file input so choosing the same file again can create another
-  // queue item intentionally.
+  // Reset so the same local file can be selected again intentionally.
   elements.bookFiles.value = "";
 
   renderQueue();
+
+  if (supported.length > 0) {
+    try {
+      await refreshDuplicateStates();
+    } catch (error) {
+      setMessage(
+        elements.uploadMessage,
+        `Could not check duplicates: ${getErrorMessage(error)}`,
+        "error"
+      );
+    }
+  }
 
   if (rejected.length > 0) {
     setMessage(
@@ -232,6 +247,99 @@ function handleBookSelection() {
       "error"
     );
   }
+}
+
+/**
+ * Compare queued files with files currently in KOCloud/Books.
+ */
+async function refreshDuplicateStates() {
+  const accessToken = googleAuth.getAccessToken();
+  const booksFolderId = state.storage?.books?.id;
+
+  if (!accessToken || !booksFolderId) {
+    return;
+  }
+
+  const existingBooks =
+    await googleDriveApi.listManagedBooks(
+      accessToken,
+      booksFolderId
+    );
+
+  const existingByName = new Map();
+
+  for (const book of existingBooks) {
+    const key = normalizeBookName(book.name);
+
+    if (!existingByName.has(key)) {
+      existingByName.set(key, book);
+    }
+  }
+
+  for (const item of state.queue) {
+    if (
+      item.status === "uploading" ||
+      item.status === "done" ||
+      item.status === "replaced"
+    ) {
+      continue;
+    }
+
+    const existing = existingByName.get(
+      normalizeBookName(item.file.name)
+    );
+
+    if (existing) {
+      item.existingFile = existing;
+      item.status = "duplicate";
+      item.progress = 0;
+      item.error = "";
+
+      if (
+        item.duplicateAction !== "replace"
+      ) {
+        item.duplicateAction = "skip";
+      }
+    } else {
+      item.existingFile = null;
+
+      if (
+        item.status === "duplicate" ||
+        item.status === "skipped"
+      ) {
+        item.status = "waiting";
+      }
+
+      item.duplicateAction = "skip";
+      item.progress = 0;
+      item.error = "";
+    }
+  }
+
+  renderQueue();
+}
+
+/**
+ * Change the action for one duplicate item.
+ *
+ * @param {string} queueId
+ * @param {"skip"|"replace"} action
+ */
+function setDuplicateAction(queueId, action) {
+  if (state.busy) {
+    return;
+  }
+
+  const item = state.queue.find(
+    (candidate) => candidate.id === queueId
+  );
+
+  if (!item || item.status !== "duplicate") {
+    return;
+  }
+
+  item.duplicateAction = action;
+  renderQueue();
 }
 
 /**
@@ -249,7 +357,7 @@ function handleClearQueue() {
 }
 
 /**
- * Upload all waiting/error items sequentially.
+ * Upload/replace waiting items sequentially.
  */
 async function handleUploadAll() {
   if (state.busy) {
@@ -280,7 +388,8 @@ async function handleUploadAll() {
   const pendingItems = state.queue.filter(
     (item) =>
       item.status === "waiting" ||
-      item.status === "error"
+      item.status === "error" ||
+      item.status === "duplicate"
   );
 
   if (pendingItems.length === 0) {
@@ -295,7 +404,6 @@ async function handleUploadAll() {
   clearMessage(elements.uploadMessage);
 
   for (const item of pendingItems) {
-    item.status = "waiting";
     item.progress = 0;
     item.error = "";
     item.uploadedFile = null;
@@ -305,36 +413,56 @@ async function handleUploadAll() {
   updateBatchProgress();
 
   let succeeded = 0;
+  let replaced = 0;
   let skipped = 0;
   let failed = 0;
 
   try {
+    // Re-read Drive immediately before the batch to avoid stale duplicate
+    // decisions if the cloud changed after file selection.
     const existingBooks =
       await googleDriveApi.listManagedBooks(
         accessToken,
         booksFolderId
       );
 
-    const existingNames = new Set(
-      existingBooks.map((book) =>
-        normalizeBookName(book.name)
-      )
-    );
+    const existingByName = new Map();
+
+    for (const book of existingBooks) {
+      const key = normalizeBookName(book.name);
+
+      if (!existingByName.has(key)) {
+        existingByName.set(key, book);
+      }
+    }
 
     for (const item of pendingItems) {
       const normalizedName =
         normalizeBookName(item.file.name);
 
-      if (existingNames.has(normalizedName)) {
-        item.status = "skipped";
-        item.progress = 100;
-        item.error = "";
-        skipped += 1;
+      const cloudExisting =
+        existingByName.get(normalizedName) || null;
 
-        renderQueue();
-        updateBatchProgress();
-        continue;
+      if (cloudExisting) {
+        item.existingFile = cloudExisting;
+
+        if (item.duplicateAction !== "replace") {
+          item.status = "skipped";
+          item.progress = 100;
+          item.error = "";
+          skipped += 1;
+
+          renderQueue();
+          updateBatchProgress();
+          continue;
+        }
+      } else if (item.status === "duplicate") {
+        // The previously detected duplicate disappeared before upload.
+        item.existingFile = null;
+        item.duplicateAction = "skip";
+        item.status = "waiting";
       }
+
       const currentToken = googleAuth.getAccessToken();
 
       if (!currentToken) {
@@ -343,6 +471,7 @@ async function handleUploadAll() {
           "Google authorization is no longer available.";
         failed += 1;
         renderQueue();
+        updateBatchProgress();
         continue;
       }
 
@@ -354,12 +483,26 @@ async function handleUploadAll() {
       updateBatchProgress();
 
       try {
-        const sessionUrl =
-          await googleDriveApi.createBookUploadSession(
-            currentToken,
-            item.file,
-            booksFolderId
-          );
+        let sessionUrl;
+        const isReplace =
+          Boolean(cloudExisting) &&
+          item.duplicateAction === "replace";
+
+        if (isReplace) {
+          sessionUrl =
+            await googleDriveApi.createBookReplaceSession(
+              currentToken,
+              item.file,
+              cloudExisting.id
+            );
+        } else {
+          sessionUrl =
+            await googleDriveApi.createBookUploadSession(
+              currentToken,
+              item.file,
+              booksFolderId
+            );
+        }
 
         const task = new BrowserUploadTask(
           sessionUrl,
@@ -380,16 +523,34 @@ async function handleUploadAll() {
         state.uploadTask = null;
 
         item.progress = 100;
-        item.status = "done";
         item.uploadedFile = uploadedFile;
 
-        existingNames.add(
-          normalizeBookName(
-            uploadedFile.name || item.file.name
-          )
-        );
+        if (isReplace) {
+          item.status = "replaced";
+          replaced += 1;
 
-        succeeded += 1;
+          existingByName.set(
+            normalizedName,
+            uploadedFile.id
+              ? uploadedFile
+              : cloudExisting
+          );
+        } else {
+          item.status = "done";
+          succeeded += 1;
+
+          existingByName.set(
+            normalizedName,
+            uploadedFile.id
+              ? uploadedFile
+              : {
+                  id: uploadedFile.id,
+                  name:
+                    uploadedFile.name ||
+                    item.file.name,
+                }
+          );
+        }
       } catch (error) {
         state.uploadTask = null;
 
@@ -405,6 +566,13 @@ async function handleUploadAll() {
       renderQueue();
       updateBatchProgress();
     }
+  } catch (error) {
+    setMessage(
+      elements.uploadMessage,
+      `Could not prepare upload queue: ${getErrorMessage(error)}`,
+      "error"
+    );
+    return;
   } finally {
     state.uploadTask = null;
     setBusy(false);
@@ -412,34 +580,36 @@ async function handleUploadAll() {
     updateBatchProgress();
   }
 
-  if (failed === 0) {
-    const parts = [];
+  const parts = [];
 
-    if (succeeded > 0) {
-      parts.push(
-        `${succeeded} uploaded`
-      );
-    }
+  if (succeeded > 0) {
+    parts.push(`${succeeded} uploaded`);
+  }
 
-    if (skipped > 0) {
-      parts.push(
-        `${skipped} skipped as duplicate`
-      );
-    }
+  if (replaced > 0) {
+    parts.push(`${replaced} replaced`);
+  }
 
+  if (skipped > 0) {
+    parts.push(`${skipped} skipped`);
+  }
+
+  if (failed > 0) {
+    parts.push(`${failed} failed`);
+  }
+
+  if (failed > 0) {
     setMessage(
       elements.uploadMessage,
-      `${parts.join(", ")}.`,
-      "success"
+      `${parts.join(", ")}. ` +
+        "Press Upload books again to retry failed items.",
+      "error"
     );
   } else {
     setMessage(
       elements.uploadMessage,
-      `${succeeded} uploaded, ` +
-        `${skipped} skipped, ` +
-        `${failed} failed. ` +
-        "Press Upload books again to retry failed items.",
-      "error"
+      `${parts.join(", ")}.`,
+      "success"
     );
   }
 }
@@ -460,6 +630,8 @@ function createQueueItem(file) {
     progress: 0,
     error: "",
     uploadedFile: null,
+    existingFile: null,
+    duplicateAction: "skip",
   };
 }
 
@@ -497,6 +669,8 @@ function createQueueItemElement(item) {
   li.className = "queue-item";
   li.dataset.queueId = item.id;
   li.dataset.state = item.status;
+  li.dataset.duplicateAction =
+    item.duplicateAction;
 
   const main = document.createElement("div");
   main.className = "queue-item-main";
@@ -515,11 +689,60 @@ function createQueueItemElement(item) {
   status.className = "queue-item-status";
   status.textContent = getQueueStatusText(item);
 
+  const actions = document.createElement("div");
+  actions.className = "queue-item-actions";
+  actions.hidden = item.status !== "duplicate";
+
+  if (item.status === "duplicate") {
+    const skipButton =
+      document.createElement("button");
+
+    skipButton.type = "button";
+    skipButton.className = "queue-action-button";
+    skipButton.dataset.action = "skip";
+    skipButton.textContent = "Skip";
+    skipButton.disabled =
+      state.busy ||
+      item.duplicateAction === "skip";
+
+    skipButton.addEventListener(
+      "click",
+      () => {
+        setDuplicateAction(item.id, "skip");
+      }
+    );
+
+    const replaceButton =
+      document.createElement("button");
+
+    replaceButton.type = "button";
+    replaceButton.className =
+      "queue-action-button";
+    replaceButton.dataset.action = "replace";
+    replaceButton.textContent = "Replace";
+    replaceButton.disabled =
+      state.busy ||
+      item.duplicateAction === "replace";
+
+    replaceButton.addEventListener(
+      "click",
+      () => {
+        setDuplicateAction(item.id, "replace");
+      }
+    );
+
+    actions.append(
+      skipButton,
+      replaceButton
+    );
+  }
+
   const progress = document.createElement("div");
   progress.className = "queue-item-progress";
   progress.hidden =
     item.status !== "uploading" &&
-    item.status !== "done";
+    item.status !== "done" &&
+    item.status !== "replaced";
 
   const progressBar =
     document.createElement("progress");
@@ -536,7 +759,13 @@ function createQueueItemElement(item) {
   error.className = "queue-item-error";
   error.textContent = item.error;
 
-  li.append(main, status, progress, error);
+  li.append(
+    main,
+    status,
+    actions,
+    progress,
+    error
+  );
 
   return li;
 }
@@ -556,6 +785,8 @@ function updateQueueItemElement(item) {
   }
 
   row.dataset.state = item.status;
+  row.dataset.duplicateAction =
+    item.duplicateAction;
 
   const status = row.querySelector(
     ".queue-item-status"
@@ -584,7 +815,8 @@ function updateQueueItemElement(item) {
   if (progressRegion) {
     progressRegion.hidden =
       item.status !== "uploading" &&
-      item.status !== "done";
+      item.status !== "done" &&
+      item.status !== "replaced";
   }
 
   if (progressBar) {
@@ -609,13 +841,21 @@ function updateQueueItemElement(item) {
 function getQueueStatusText(item) {
   switch (item.status) {
     case "uploading":
-      return "Uploading…";
+      return item.duplicateAction === "replace"
+        ? "Replacing…"
+        : "Uploading…";
     case "done":
       return "Uploaded";
+    case "replaced":
+      return "Replaced";
     case "error":
       return "Failed";
     case "skipped":
       return "Skipped · already exists";
+    case "duplicate":
+      return item.duplicateAction === "replace"
+        ? "Already exists · Replace selected"
+        : "Already exists · Skip selected";
     default:
       return "Waiting";
   }
@@ -639,6 +879,7 @@ function updateBatchProgress() {
     (sum, item) => {
       if (
         item.status === "done" ||
+        item.status === "replaced" ||
         item.status === "skipped"
       ) {
         return sum + item.file.size;
@@ -665,6 +906,7 @@ function updateBatchProgress() {
   const completedCount = state.queue.filter(
     (item) =>
       item.status === "done" ||
+      item.status === "replaced" ||
       item.status === "skipped"
   ).length;
 
@@ -797,7 +1039,8 @@ function updateControls() {
     state.queue.some(
       (item) =>
         item.status === "waiting" ||
-        item.status === "error"
+        item.status === "error" ||
+        item.status === "duplicate"
     );
 
   elements.uploadAll.disabled = !canUpload;
@@ -806,23 +1049,21 @@ function updateControls() {
 
   if (state.busy) {
     elements.uploadAll.textContent = "Uploading…";
-  } else {
-    const retryCount = state.queue.filter(
-      (item) => item.status === "error"
-    ).length;
-
-    const waitingCount = state.queue.filter(
-      (item) => item.status === "waiting"
-    ).length;
-
-    const uploadable = waitingCount + retryCount;
-
-    elements.uploadAll.textContent =
-      uploadable > 0
-        ? `Upload ${uploadable} book` +
-          `${uploadable === 1 ? "" : "s"}`
-        : "Upload books";
+    return;
   }
+
+  const actionableCount = state.queue.filter(
+    (item) =>
+      item.status === "waiting" ||
+      item.status === "error" ||
+      item.status === "duplicate"
+  ).length;
+
+  elements.uploadAll.textContent =
+    actionableCount > 0
+      ? `Upload ${actionableCount} book` +
+        `${actionableCount === 1 ? "" : "s"}`
+      : "Upload books";
 }
 
 /**
@@ -872,10 +1113,6 @@ function clearMessage(element) {
 
 /**
  * Normalize a filename for duplicate comparison.
- *
- * Google Drive permits multiple files with the same name, but KOCloud
- * Companion treats case-only filename differences as duplicates to avoid
- * accidental copies such as "Dune.epub" and "dune.epub".
  *
  * @param {string} name
  * @returns {string}

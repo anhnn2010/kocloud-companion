@@ -515,3 +515,49 @@ progress {
   }
 }
 
+/* Duplicate actions */
+
+.queue-item-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.queue-item-actions[hidden] {
+  display: none;
+}
+
+.queue-action-button {
+  min-height: 34px;
+  padding: 7px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.queue-action-button:hover:not(:disabled) {
+  background: var(--secondary-bg);
+}
+
+.queue-action-button[data-action="replace"] {
+  border-color: var(--primary);
+}
+
+.queue-action-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.queue-item[data-state="duplicate"] .queue-item-status {
+  color: var(--muted);
+}
+
+.queue-item[data-duplicate-action="replace"] .queue-item-status {
+  color: var(--text);
+}
+
