@@ -25,6 +25,13 @@ const elements = {
   batchProgress: document.getElementById("batch-progress"),
   batchProgressBar: document.getElementById("batch-progress-bar"),
   batchProgressText: document.getElementById("batch-progress-text"),
+
+  refreshLibrary: document.getElementById("refresh-library"),
+  libraryEmpty: document.getElementById("library-empty"),
+  libraryContent: document.getElementById("library-content"),
+  librarySummary: document.getElementById("library-summary"),
+  libraryList: document.getElementById("library-list"),
+  libraryMessage: document.getElementById("library-message"),
 };
 
 const state = {
@@ -32,6 +39,8 @@ const state = {
   queue: [],
   uploadTask: null,
   busy: false,
+  libraryBooks: [],
+  libraryLoading: false,
 };
 
 /**
@@ -66,6 +75,11 @@ function init() {
   elements.uploadAll.addEventListener(
     "click",
     handleUploadAll
+  );
+
+  elements.refreshLibrary.addEventListener(
+    "click",
+    handleRefreshLibrary
   );
 
   googleAuth.subscribe(handleAuthEvent);
@@ -170,6 +184,8 @@ async function handleConnectGoogle() {
     if (state.queue.length > 0) {
       await refreshDuplicateStates();
     }
+
+    await loadLibrary();
   } catch (error) {
     state.storage = null;
     disableBookSelection();
@@ -190,6 +206,183 @@ async function handleConnectGoogle() {
 
     setBusy(false);
   }
+}
+
+/**
+ * Refresh the read-only KOCloud library view.
+ */
+async function handleRefreshLibrary() {
+  if (state.busy || state.libraryLoading) {
+    return;
+  }
+
+  await loadLibrary();
+}
+
+/**
+ * Load books currently visible in KOCloud/Books.
+ */
+async function loadLibrary() {
+  const accessToken = googleAuth.getAccessToken();
+  const booksFolderId = state.storage?.books?.id;
+
+  if (!accessToken || !booksFolderId) {
+    state.libraryBooks = [];
+    renderLibrary();
+    return;
+  }
+
+  state.libraryLoading = true;
+  updateLibraryControls();
+  clearMessage(elements.libraryMessage);
+
+  try {
+    const books =
+      await googleDriveApi.listManagedBooks(
+        accessToken,
+        booksFolderId
+      );
+
+    books.sort(compareLibraryBooks);
+
+    state.libraryBooks = books;
+    renderLibrary();
+  } catch (error) {
+    setMessage(
+      elements.libraryMessage,
+      `Could not load library: ${getErrorMessage(error)}`,
+      "error"
+    );
+  } finally {
+    state.libraryLoading = false;
+    updateLibraryControls();
+  }
+}
+
+/**
+ * Sort library books by most recently modified, then by name.
+ *
+ * @param {object} left
+ * @param {object} right
+ * @returns {number}
+ */
+function compareLibraryBooks(left, right) {
+  const leftTime =
+    Date.parse(left.modifiedTime || "") || 0;
+
+  const rightTime =
+    Date.parse(right.modifiedTime || "") || 0;
+
+  if (leftTime !== rightTime) {
+    return rightTime - leftTime;
+  }
+
+  return String(left.name || "").localeCompare(
+    String(right.name || ""),
+    undefined,
+    {
+      sensitivity: "base",
+      numeric: true,
+    }
+  );
+}
+
+/**
+ * Render the read-only My Books list.
+ */
+function renderLibrary() {
+  const connected =
+    googleAuth.isConnected() &&
+    Boolean(state.storage?.books?.id);
+
+  if (!connected) {
+    elements.libraryEmpty.hidden = false;
+    elements.libraryEmpty.textContent =
+      "Connect Google Drive to load your library.";
+    elements.libraryContent.hidden = true;
+    elements.libraryList.replaceChildren();
+    elements.librarySummary.textContent = "0 books";
+    updateLibraryControls();
+    return;
+  }
+
+  const books = state.libraryBooks;
+
+  if (books.length === 0) {
+    elements.libraryEmpty.hidden = false;
+    elements.libraryEmpty.textContent =
+      "No books found in KOCloud/Books.";
+    elements.libraryContent.hidden = true;
+    elements.libraryList.replaceChildren();
+    elements.librarySummary.textContent = "0 books";
+    updateLibraryControls();
+    return;
+  }
+
+  elements.libraryEmpty.hidden = true;
+  elements.libraryContent.hidden = false;
+  elements.librarySummary.textContent =
+    `${books.length} book${books.length === 1 ? "" : "s"}`;
+
+  elements.libraryList.replaceChildren();
+
+  for (const book of books) {
+    elements.libraryList.append(
+      createLibraryItemElement(book)
+    );
+  }
+
+  updateLibraryControls();
+}
+
+/**
+ * Create one read-only library row.
+ *
+ * @param {object} book
+ * @returns {HTMLLIElement}
+ */
+function createLibraryItemElement(book) {
+  const li = document.createElement("li");
+  li.className = "library-item";
+
+  const name = document.createElement("div");
+  name.className = "library-item-name";
+  name.textContent = book.name || "Untitled";
+
+  const size = document.createElement("div");
+  size.className = "library-item-size";
+  size.textContent = formatBytes(
+    Number(book.size || 0)
+  );
+
+  const meta = document.createElement("div");
+  meta.className = "library-item-meta";
+
+  if (book.modifiedTime) {
+    meta.textContent =
+      `Updated ${formatDateTime(book.modifiedTime)}`;
+  } else {
+    meta.textContent = "Updated time unavailable";
+  }
+
+  li.append(name, size, meta);
+  return li;
+}
+
+/**
+ * Enable/disable the Library Refresh button.
+ */
+function updateLibraryControls() {
+  elements.refreshLibrary.disabled =
+    state.busy ||
+    state.libraryLoading ||
+    !googleAuth.isConnected() ||
+    !state.storage?.books?.id;
+
+  elements.refreshLibrary.textContent =
+    state.libraryLoading
+      ? "Refreshing…"
+      : "Refresh";
 }
 
 /**
@@ -627,6 +820,8 @@ async function handleUploadAll() {
       "success"
     );
   }
+
+  await loadLibrary();
 }
 
 /**
@@ -979,18 +1174,23 @@ function resetBatchProgress() {
 function handleAuthEvent(event) {
   if (event.type === "disconnected") {
     state.storage = null;
+    state.libraryBooks = [];
     disableBookSelection();
     setDisconnectedState();
+    renderLibrary();
   }
 
   if (event.type === "error") {
     state.storage = null;
+    state.libraryBooks = [];
     disableBookSelection();
 
     setConnectionStatus(
       "Google Drive: Connection failed",
       "error"
     );
+
+    renderLibrary();
   }
 }
 
@@ -1045,9 +1245,11 @@ function setDisconnectedState() {
   );
 
   state.storage = null;
+  state.libraryBooks = [];
 
   disableBookSelection();
   updateControls();
+  renderLibrary();
 }
 
 /**
@@ -1072,6 +1274,7 @@ function setBusy(busy) {
   }
 
   updateControls();
+  updateLibraryControls();
 }
 
 /**
@@ -1254,6 +1457,28 @@ function formatBytes(bytes) {
     value >= 10 ? 1 : 2;
 
   return `${value.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+/**
+ * Format an ISO date/time for the user's browser locale.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function formatDateTime(value) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Unknown";
+  }
+
+  return new Intl.DateTimeFormat(
+    undefined,
+    {
+      dateStyle: "medium",
+      timeStyle: "short",
+    }
+  ).format(date);
 }
 
 /**
