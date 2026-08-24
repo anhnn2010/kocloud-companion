@@ -53,6 +53,28 @@
         placeholder="1234567890-....apps.googleusercontent.com"
       >
 
+      <label for="google-picker-api-key">
+        Google Picker API Key
+      </label>
+      <input
+        id="google-picker-api-key"
+        type="text"
+        inputmode="text"
+        autocomplete="off"
+        placeholder="AIza..."
+      >
+
+      <label for="google-picker-app-id">
+        Google Cloud Project Number
+      </label>
+      <input
+        id="google-picker-app-id"
+        type="text"
+        inputmode="numeric"
+        autocomplete="off"
+        placeholder="123456789012"
+      >
+
       <div class="button-row">
         <button id="save-client-id" type="button" class="secondary-button">
           Save Client ID
@@ -128,6 +150,67 @@
       <p id="upload-message" class="message" aria-live="polite"></p>
     </section>
 
+
+    <section class="card" aria-labelledby="drive-import-title">
+      <h2 id="drive-import-title">Import from Google Drive</h2>
+
+      <p class="help-text">
+        Select EPUB/PDF files from your Drive or files shared with you.
+        Google copies the selected files directly into KOCloud/Books.
+      </p>
+
+      <button
+        id="open-drive-picker"
+        type="button"
+        class="secondary-button full-width"
+        disabled
+      >
+        Select books from Google Drive
+      </button>
+
+      <div id="drive-selection-empty" class="queue-empty">
+        No Drive books selected.
+      </div>
+
+      <div id="drive-selection" class="upload-queue" hidden>
+        <div class="queue-header">
+          <strong id="drive-selection-summary">
+            0 books selected
+          </strong>
+
+          <button
+            id="clear-drive-selection"
+            type="button"
+            class="text-button"
+          >
+            Clear
+          </button>
+        </div>
+
+        <ul id="drive-selection-list" class="queue-list"></ul>
+
+        <div class="upload-actions">
+          <div class="help-text">
+            Destination: <strong>KOCloud / Books</strong>
+          </div>
+
+          <button
+            id="import-drive-books"
+            type="button"
+            class="primary-button full-width"
+            disabled
+          >
+            Import selected books
+          </button>
+        </div>
+      </div>
+
+      <p
+        id="drive-import-message"
+        class="message"
+        aria-live="polite"
+      ></p>
+    </section>
 
     <section class="card" aria-labelledby="library-title">
       <div class="section-header">

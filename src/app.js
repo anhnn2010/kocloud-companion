@@ -1,5 +1,6 @@
 import { googleAuth } from "./google-drive/auth.js";
 import { googleDriveApi } from "./google-drive/api.js";
+import { googleDrivePicker } from "./google-drive/picker.js";
 import {
   BrowserUploadTask,
   UploadCancelledError,
@@ -7,10 +8,26 @@ import {
 
 const elements = {
   clientId: document.getElementById("google-client-id"),
+  pickerApiKey: document.getElementById("google-picker-api-key"),
+  pickerAppId: document.getElementById("google-picker-app-id"),
   saveClientId: document.getElementById("save-client-id"),
   connectGoogle: document.getElementById("connect-google"),
   connectionStatus: document.getElementById("connection-status"),
   authMessage: document.getElementById("auth-message"),
+
+  openDrivePicker: document.getElementById("open-drive-picker"),
+  driveSelectionEmpty: document.getElementById("drive-selection-empty"),
+  driveSelection: document.getElementById("drive-selection"),
+  driveSelectionSummary:
+    document.getElementById("drive-selection-summary"),
+  driveSelectionList:
+    document.getElementById("drive-selection-list"),
+  clearDriveSelection:
+    document.getElementById("clear-drive-selection"),
+  importDriveBooks:
+    document.getElementById("import-drive-books"),
+  driveImportMessage:
+    document.getElementById("drive-import-message"),
 
   bookFiles: document.getElementById("book-files"),
   queueEmpty: document.getElementById("queue-empty"),
@@ -41,6 +58,8 @@ const state = {
   busy: false,
   libraryBooks: [],
   libraryLoading: false,
+  driveSelection: [],
+  driveImporting: false,
 };
 
 /**
@@ -49,8 +68,13 @@ const state = {
 function init() {
   elements.clientId.value = googleAuth.getClientId();
 
+  const pickerConfig = googleDrivePicker.getConfig();
+  elements.pickerApiKey.value = pickerConfig.apiKey;
+  elements.pickerAppId.value = pickerConfig.appId;
+
   setDisconnectedState();
   renderQueue();
+  renderDriveSelection();
 
   elements.saveClientId.addEventListener(
     "click",
@@ -82,6 +106,21 @@ function init() {
     handleRefreshLibrary
   );
 
+  elements.openDrivePicker.addEventListener(
+    "click",
+    handleOpenDrivePicker
+  );
+
+  elements.clearDriveSelection.addEventListener(
+    "click",
+    handleClearDriveSelection
+  );
+
+  elements.importDriveBooks.addEventListener(
+    "click",
+    handleImportDriveBooks
+  );
+
   googleAuth.subscribe(handleAuthEvent);
 }
 
@@ -94,13 +133,19 @@ function handleSaveClientId() {
   try {
     googleAuth.saveClientId(elements.clientId.value);
 
+    googleDrivePicker.saveConfig({
+      apiKey: elements.pickerApiKey.value,
+      appId: elements.pickerAppId.value,
+    });
+
     setMessage(
       elements.authMessage,
-      "Web OAuth Client ID saved in this browser.",
+      "Google configuration saved in this browser.",
       "success"
     );
 
     setDisconnectedState();
+    updateDriveImportControls();
   } catch (error) {
     setMessage(
       elements.authMessage,
@@ -180,6 +225,7 @@ async function handleConnectGoogle() {
     );
 
     enableBookSelection();
+    updateDriveImportControls();
 
     if (state.queue.length > 0) {
       await refreshDuplicateStates();
@@ -206,6 +252,368 @@ async function handleConnectGoogle() {
 
     setBusy(false);
   }
+}
+
+/**
+ * Open Google Picker and preview selected Drive books.
+ */
+async function handleOpenDrivePicker() {
+  if (state.busy) {
+    return;
+  }
+
+  clearMessage(elements.driveImportMessage);
+
+  const accessToken = googleAuth.getAccessToken();
+
+  if (!accessToken) {
+    setMessage(
+      elements.driveImportMessage,
+      "Connect Google Drive before selecting books.",
+      "error"
+    );
+    return;
+  }
+
+  if (!googleDrivePicker.isConfigured()) {
+    setMessage(
+      elements.driveImportMessage,
+      "Save Google Picker API key and project number first.",
+      "error"
+    );
+    return;
+  }
+
+  elements.openDrivePicker.disabled = true;
+  elements.openDrivePicker.textContent =
+    "Opening Google Drive…";
+
+  try {
+    const selectedBooks =
+      await googleDrivePicker.pickBooks(
+        accessToken
+      );
+
+    if (selectedBooks.length === 0) {
+      return;
+    }
+
+    state.driveSelection = selectedBooks.map(
+      (book) => ({
+        ...book,
+        importStatus: "selected",
+        importMessage: "",
+      })
+    );
+
+    renderDriveSelection();
+
+    setMessage(
+      elements.driveImportMessage,
+      `${selectedBooks.length} Drive book` +
+        `${selectedBooks.length === 1 ? "" : "s"} selected. ` +
+        "Ready to import into KOCloud/Books.",
+      "success"
+    );
+  } catch (error) {
+    setMessage(
+      elements.driveImportMessage,
+      getErrorMessage(error),
+      "error"
+    );
+  } finally {
+    elements.openDrivePicker.textContent =
+      "Select books from Google Drive";
+
+    updateDriveImportControls();
+  }
+}
+
+/**
+ * Clear the current Google Drive import preview.
+ */
+function handleClearDriveSelection() {
+  if (state.busy || state.driveImporting) {
+    return;
+  }
+
+  state.driveSelection = [];
+  clearMessage(elements.driveImportMessage);
+  renderDriveSelection();
+}
+
+/**
+ * Render Google Picker selections for Checkpoint 1 preview.
+ */
+function renderDriveSelection() {
+  const books = state.driveSelection;
+
+  elements.driveSelectionEmpty.hidden =
+    books.length > 0;
+
+  elements.driveSelection.hidden =
+    books.length === 0;
+
+  elements.driveSelectionSummary.textContent =
+    `${books.length} book` +
+    `${books.length === 1 ? "" : "s"} selected`;
+
+  elements.driveSelectionList.replaceChildren();
+
+  for (const book of books) {
+    const item = document.createElement("li");
+    item.className = "queue-item";
+
+    const main = document.createElement("div");
+    main.className = "queue-item-main";
+
+    const name = document.createElement("div");
+    name.className = "queue-item-name";
+    name.textContent = book.name;
+
+    const type = document.createElement("div");
+    type.className = "queue-item-size";
+    type.textContent =
+      formatDriveBookType(book.mimeType);
+
+    main.append(name, type);
+
+    const status = document.createElement("div");
+    status.className = "queue-item-status";
+    status.textContent =
+      getDriveImportStatusText(book);
+
+    if (book.importStatus === "done") {
+      status.classList.add("status-success");
+    } else if (
+      book.importStatus === "error" ||
+      book.importStatus === "blocked"
+    ) {
+      status.classList.add("status-error");
+    }
+
+    item.append(main, status);
+    elements.driveSelectionList.append(item);
+  }
+
+  updateDriveImportControls();
+}
+
+/**
+ * Enable/disable Google Drive import controls.
+ */
+function updateDriveImportControls() {
+  const ready =
+    !state.busy &&
+    !state.driveImporting &&
+    googleAuth.isConnected();
+
+  const canOpen =
+    ready &&
+    googleDrivePicker.isConfigured();
+
+  const canImport =
+    ready &&
+    Boolean(state.storage?.books?.id) &&
+    state.driveSelection.some(
+      (book) =>
+        book.importStatus !== "done" &&
+        book.importStatus !== "blocked"
+    );
+
+  elements.openDrivePicker.disabled = !canOpen;
+
+  elements.clearDriveSelection.disabled =
+    !ready ||
+    state.driveSelection.length === 0;
+
+  elements.importDriveBooks.disabled =
+    !canImport;
+
+  elements.importDriveBooks.textContent =
+    state.driveImporting
+      ? "Importing…"
+      : "Import selected books";
+}
+
+/**
+ * Import the current Google Picker selection into KOCloud/Books.
+ *
+ * Files are processed sequentially so one failed/shared-restricted file does
+ * not stop the rest of the batch.
+ */
+async function handleImportDriveBooks() {
+  if (state.busy || state.driveImporting) {
+    return;
+  }
+
+  const accessToken = googleAuth.getAccessToken();
+  const booksFolderId = state.storage?.books?.id;
+
+  if (!accessToken || !booksFolderId) {
+    setMessage(
+      elements.driveImportMessage,
+      "Connect Google Drive and resolve KOCloud/Books first.",
+      "error"
+    );
+    return;
+  }
+
+  const pendingBooks =
+    state.driveSelection.filter(
+      (book) =>
+        book.importStatus !== "done" &&
+        book.importStatus !== "blocked"
+    );
+
+  if (pendingBooks.length === 0) {
+    return;
+  }
+
+  state.driveImporting = true;
+  clearMessage(elements.driveImportMessage);
+  updateDriveImportControls();
+
+  let importedCount = 0;
+  let blockedCount = 0;
+  let failedCount = 0;
+
+  try {
+    for (const book of pendingBooks) {
+      book.importStatus = "checking";
+      book.importMessage = "";
+      renderDriveSelection();
+
+      try {
+        const source =
+          await googleDriveApi.getImportSource(
+            accessToken,
+            book.id
+          );
+
+        book.name = source.name || book.name;
+        book.mimeType =
+          source.mimeType || book.mimeType;
+
+        if (!source.capabilities?.canCopy) {
+          book.importStatus = "blocked";
+          book.importMessage =
+            "Owner or administrator does not allow copying.";
+          blockedCount += 1;
+          renderDriveSelection();
+          continue;
+        }
+
+        book.importStatus = "importing";
+        book.importMessage =
+          "Copying directly in Google Drive…";
+        renderDriveSelection();
+
+        await googleDriveApi.copyBookToFolder(
+          accessToken,
+          book.id,
+          booksFolderId,
+          book.name
+        );
+
+        book.importStatus = "done";
+        book.importMessage =
+          "Imported to KOCloud/Books";
+        importedCount += 1;
+      } catch (error) {
+        book.importStatus = "error";
+        book.importMessage =
+          getErrorMessage(error);
+        failedCount += 1;
+      }
+
+      renderDriveSelection();
+    }
+
+    if (importedCount > 0) {
+      await loadLibrary();
+    }
+
+    const parts = [];
+
+    if (importedCount > 0) {
+      parts.push(
+        `${importedCount} imported`
+      );
+    }
+
+    if (blockedCount > 0) {
+      parts.push(
+        `${blockedCount} cannot be copied`
+      );
+    }
+
+    if (failedCount > 0) {
+      parts.push(
+        `${failedCount} failed`
+      );
+    }
+
+    const message =
+      parts.length > 0
+        ? `${parts.join(", ")}.`
+        : "No books were imported.";
+
+    setMessage(
+      elements.driveImportMessage,
+      message,
+      failedCount > 0 ? "error" : "success"
+    );
+  } finally {
+    state.driveImporting = false;
+    updateDriveImportControls();
+    renderDriveSelection();
+  }
+}
+
+/**
+ * Return user-facing status text for one Drive import item.
+ *
+ * @param {object} book
+ * @returns {string}
+ */
+function getDriveImportStatusText(book) {
+  if (book.importMessage) {
+    return book.importMessage;
+  }
+
+  switch (book.importStatus) {
+    case "checking":
+      return "Checking copy permission…";
+    case "importing":
+      return "Importing…";
+    case "done":
+      return "Imported to KOCloud/Books";
+    case "blocked":
+      return "This file cannot be copied";
+    case "error":
+      return "Import failed";
+    default:
+      return "Selected from Google Drive";
+  }
+}
+
+/**
+ * Return a short file-type label for Drive Picker results.
+ *
+ * @param {string} mimeType
+ * @returns {string}
+ */
+function formatDriveBookType(mimeType) {
+  if (mimeType === "application/epub+zip") {
+    return "EPUB";
+  }
+
+  if (mimeType === "application/pdf") {
+    return "PDF";
+  }
+
+  return "Book";
 }
 
 /**
@@ -1178,6 +1586,7 @@ function handleAuthEvent(event) {
     disableBookSelection();
     setDisconnectedState();
     renderLibrary();
+    updateDriveImportControls();
   }
 
   if (event.type === "error") {
@@ -1191,6 +1600,7 @@ function handleAuthEvent(event) {
     );
 
     renderLibrary();
+    updateDriveImportControls();
   }
 }
 
@@ -1250,6 +1660,7 @@ function setDisconnectedState() {
   disableBookSelection();
   updateControls();
   renderLibrary();
+  updateDriveImportControls();
 }
 
 /**
@@ -1275,6 +1686,7 @@ function setBusy(busy) {
 
   updateControls();
   updateLibraryControls();
+  updateDriveImportControls();
 }
 
 /**

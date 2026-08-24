@@ -209,6 +209,107 @@ export class GoogleDriveApi {
   }
 
   /**
+   * Read metadata and copy capability for a Drive file selected by Picker.
+   *
+   * @param {string} accessToken
+   * @param {string} fileId
+   * @returns {Promise<object>}
+   */
+  async getImportSource(
+    accessToken,
+    fileId
+  ) {
+    const safeFileId =
+      encodeURIComponent(fileId);
+
+    const params = new URLSearchParams({
+      supportsAllDrives: "true",
+      fields:
+        "id,name,mimeType,size,modifiedTime," +
+        "capabilities(canCopy)",
+    });
+
+    const response = await fetch(
+      `${DRIVE_FILES_URL}/${safeFileId}?${params}`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      await throwDriveError(
+        response,
+        "Read import source"
+      );
+    }
+
+    return response.json();
+  }
+
+  /**
+   * Copy a Drive file directly into a KOCloud folder.
+   *
+   * Google performs the copy server-side, so ebook bytes do not pass through
+   * the browser.
+   *
+   * @param {string} accessToken
+   * @param {string} sourceFileId
+   * @param {string} destinationFolderId
+   * @param {string} driveName
+   * @returns {Promise<object>}
+   */
+  async copyBookToFolder(
+    accessToken,
+    sourceFileId,
+    destinationFolderId,
+    driveName
+  ) {
+    const safeFileId =
+      encodeURIComponent(sourceFileId);
+
+    const params = new URLSearchParams({
+      supportsAllDrives: "true",
+      fields:
+        "id,name,mimeType,parents,appProperties," +
+        "size,modifiedTime",
+    });
+
+    const metadata = {
+      name: driveName,
+      parents: [destinationFolderId],
+      appProperties: {
+        [ROLE_KEY]: "book",
+        [SCHEMA_KEY]: SCHEMA_VERSION,
+        kocloud_source: "drive_import",
+      },
+    };
+
+    const response = await fetch(
+      `${DRIVE_FILES_URL}/${safeFileId}/copy?${params}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type":
+            "application/json; charset=UTF-8",
+        },
+        body: JSON.stringify(metadata),
+      }
+    );
+
+    if (!response.ok) {
+      await throwDriveError(
+        response,
+        "Copy book into KOCloud"
+      );
+    }
+
+    return response.json();
+  }
+
+  /**
    * Create a resumable upload session for one KOCloud book.
    *
    * The browser will PUT ebook bytes directly to the returned session URL.
