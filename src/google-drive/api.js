@@ -184,6 +184,31 @@ export class GoogleDriveApi {
   }
 
   /**
+   * List KOCloud-managed book files in the Books folder.
+   *
+   * @param {string} accessToken
+   * @param {string} booksFolderId
+   * @returns {Promise<Array<object>>}
+   */
+  async listManagedBooks(
+    accessToken,
+    booksFolderId
+  ) {
+    const parentId =
+      escapeQueryValue(booksFolderId);
+
+    const query =
+      `'${parentId}' in parents ` +
+      "and trashed=false " +
+      `and mimeType!='${FOLDER_MIME_TYPE}'`;
+
+    return this.listFiles(
+      accessToken,
+      query
+    );
+  }
+
+  /**
    * Create a resumable upload session for one KOCloud book.
    *
    * The browser will PUT ebook bytes directly to the returned session URL.
@@ -273,7 +298,7 @@ export class GoogleDriveApi {
   }
 
   /**
-   * Return whether the file is supported by Companion V0.1.
+   * Return whether the file is supported by Companion.
    *
    * @param {File} file
    * @returns {boolean}

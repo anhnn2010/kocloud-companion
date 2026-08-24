@@ -305,10 +305,36 @@ async function handleUploadAll() {
   updateBatchProgress();
 
   let succeeded = 0;
+  let skipped = 0;
   let failed = 0;
 
   try {
+    const existingBooks =
+      await googleDriveApi.listManagedBooks(
+        accessToken,
+        booksFolderId
+      );
+
+    const existingNames = new Set(
+      existingBooks.map((book) =>
+        normalizeBookName(book.name)
+      )
+    );
+
     for (const item of pendingItems) {
+      const normalizedName =
+        normalizeBookName(item.file.name);
+
+      if (existingNames.has(normalizedName)) {
+        item.status = "skipped";
+        item.progress = 100;
+        item.error = "";
+        skipped += 1;
+
+        renderQueue();
+        updateBatchProgress();
+        continue;
+      }
       const currentToken = googleAuth.getAccessToken();
 
       if (!currentToken) {
@@ -356,6 +382,13 @@ async function handleUploadAll() {
         item.progress = 100;
         item.status = "done";
         item.uploadedFile = uploadedFile;
+
+        existingNames.add(
+          normalizeBookName(
+            uploadedFile.name || item.file.name
+          )
+        );
+
         succeeded += 1;
       } catch (error) {
         state.uploadTask = null;
@@ -380,23 +413,31 @@ async function handleUploadAll() {
   }
 
   if (failed === 0) {
+    const parts = [];
+
+    if (succeeded > 0) {
+      parts.push(
+        `${succeeded} uploaded`
+      );
+    }
+
+    if (skipped > 0) {
+      parts.push(
+        `${skipped} skipped as duplicate`
+      );
+    }
+
     setMessage(
       elements.uploadMessage,
-      `${succeeded} book` +
-        `${succeeded === 1 ? "" : "s"} uploaded to KOCloud.`,
+      `${parts.join(", ")}.`,
       "success"
-    );
-  } else if (succeeded === 0) {
-    setMessage(
-      elements.uploadMessage,
-      `Upload failed for ${failed} book` +
-        `${failed === 1 ? "" : "s"}.`,
-      "error"
     );
   } else {
     setMessage(
       elements.uploadMessage,
-      `${succeeded} uploaded, ${failed} failed. ` +
+      `${succeeded} uploaded, ` +
+        `${skipped} skipped, ` +
+        `${failed} failed. ` +
         "Press Upload books again to retry failed items.",
       "error"
     );
@@ -573,6 +614,8 @@ function getQueueStatusText(item) {
       return "Uploaded";
     case "error":
       return "Failed";
+    case "skipped":
+      return "Skipped · already exists";
     default:
       return "Waiting";
   }
@@ -594,7 +637,10 @@ function updateBatchProgress() {
 
   const loadedBytes = state.queue.reduce(
     (sum, item) => {
-      if (item.status === "done") {
+      if (
+        item.status === "done" ||
+        item.status === "skipped"
+      ) {
         return sum + item.file.size;
       }
 
@@ -616,14 +662,16 @@ function updateBatchProgress() {
         )
       : 0;
 
-  const doneCount = state.queue.filter(
-    (item) => item.status === "done"
+  const completedCount = state.queue.filter(
+    (item) =>
+      item.status === "done" ||
+      item.status === "skipped"
   ).length;
 
   elements.batchProgress.hidden = false;
   elements.batchProgressBar.value = percent;
   elements.batchProgressText.textContent =
-    `${percent}% · ${doneCount}/${state.queue.length}`;
+    `${percent}% · ${completedCount}/${state.queue.length}`;
 }
 
 /**
@@ -820,6 +868,23 @@ function setMessage(
  */
 function clearMessage(element) {
   setMessage(element, "");
+}
+
+/**
+ * Normalize a filename for duplicate comparison.
+ *
+ * Google Drive permits multiple files with the same name, but KOCloud
+ * Companion treats case-only filename differences as duplicates to avoid
+ * accidental copies such as "Dune.epub" and "dune.epub".
+ *
+ * @param {string} name
+ * @returns {string}
+ */
+function normalizeBookName(name) {
+  return name
+    .normalize("NFC")
+    .trim()
+    .toLowerCase();
 }
 
 /**
