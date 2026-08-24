@@ -67,49 +67,67 @@
     </section>
 
     <section class="card" aria-labelledby="upload-title">
-      <h2 id="upload-title">Add a book</h2>
+      <h2 id="upload-title">Add books</h2>
 
       <p class="help-text">
-        Choose one EPUB or PDF. The book is uploaded directly from this
-        browser to your KOCloud Books folder in Google Drive.
+        Choose one or more EPUB/PDF files. KOCloud uploads them one at a
+        time directly from this browser to your Google Drive Books folder.
       </p>
 
-      <label class="file-picker" for="book-file">
-        Choose EPUB / PDF
+      <label class="file-picker" for="book-files">
+        Choose EPUB / PDF files
       </label>
 
       <input
-        id="book-file"
+        id="book-files"
         class="visually-hidden"
         type="file"
         accept=".epub,.pdf,application/epub+zip,application/pdf"
+        multiple
         disabled
       >
 
-      <div id="selected-book" class="selected-book">
-        No book selected.
+      <div id="queue-empty" class="queue-empty">
+        No books selected.
+      </div>
+
+      <div id="upload-queue" class="upload-queue" hidden>
+        <div class="queue-header">
+          <strong id="queue-summary">0 books selected</strong>
+
+          <button
+            id="clear-queue"
+            type="button"
+            class="text-button"
+          >
+            Clear
+          </button>
+        </div>
+
+        <ul id="queue-list" class="queue-list"></ul>
       </div>
 
       <button
-        id="upload-book"
+        id="upload-all"
         type="button"
         class="primary-button full-width"
         disabled
       >
-        Upload book
+        Upload books
       </button>
 
       <div
-        id="upload-progress"
+        id="batch-progress"
         class="progress-region"
         hidden
       >
-        <progress id="upload-progress-bar" max="100" value="0"></progress>
-        <span id="upload-progress-text">0%</span>
+        <progress id="batch-progress-bar" max="100" value="0"></progress>
+        <span id="batch-progress-text">0%</span>
       </div>
 
       <p id="upload-message" class="message" aria-live="polite"></p>
     </section>
+
     <footer class="site-footer">
       <a href="./privacy.html">Privacy</a>
       <span aria-hidden="true">·</span>

@@ -358,3 +358,160 @@ progress {
     justify-content: start;
   }
 }
+
+/* Multi-file upload queue */
+
+.queue-empty {
+  min-height: 54px;
+  margin: 12px 0;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: #fafbfc;
+  color: var(--muted);
+}
+
+.upload-queue {
+  margin: 12px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: #fafbfc;
+  overflow: hidden;
+}
+
+.queue-header {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.text-button {
+  padding: 5px 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.text-button:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.text-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.queue-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.queue-item {
+  padding: 13px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.queue-item:first-child {
+  border-top: 0;
+}
+
+.queue-item-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+}
+
+.queue-item-name {
+  min-width: 0;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.queue-item-size {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.queue-item-status {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.queue-item[data-state="uploading"] .queue-item-status {
+  color: var(--text);
+}
+
+.queue-item[data-state="done"] .queue-item-status {
+  color: var(--success-text);
+}
+
+.queue-item[data-state="error"] .queue-item-status {
+  color: var(--error-text);
+}
+
+.queue-item-progress {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  margin-top: 9px;
+}
+
+.queue-item-progress[hidden] {
+  display: none;
+}
+
+.queue-item-progress progress {
+  height: 9px;
+}
+
+.queue-item-percent {
+  min-width: 2.8rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.queue-item-error {
+  margin-top: 7px;
+  color: var(--error-text);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.queue-item-error:empty {
+  display: none;
+}
+
+@media (max-width: 420px) {
+  .queue-item-main {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
+  .queue-item-size {
+    white-space: normal;
+  }
+
+  .progress-region {
+    grid-template-columns: 1fr;
+  }
+
+  #batch-progress-text {
+    text-align: left;
+  }
+}
+

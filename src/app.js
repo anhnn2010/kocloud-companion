@@ -12,30 +12,36 @@ const elements = {
   connectionStatus: document.getElementById("connection-status"),
   authMessage: document.getElementById("auth-message"),
 
-  bookFile: document.getElementById("book-file"),
-  selectedBook: document.getElementById("selected-book"),
-  uploadBook: document.getElementById("upload-book"),
+  bookFiles: document.getElementById("book-files"),
+  queueEmpty: document.getElementById("queue-empty"),
+  uploadQueue: document.getElementById("upload-queue"),
+  queueSummary: document.getElementById("queue-summary"),
+  queueList: document.getElementById("queue-list"),
+  clearQueue: document.getElementById("clear-queue"),
+
+  uploadAll: document.getElementById("upload-all"),
   uploadMessage: document.getElementById("upload-message"),
 
-  progressRegion: document.getElementById("upload-progress"),
-  progressBar: document.getElementById("upload-progress-bar"),
-  progressText: document.getElementById("upload-progress-text"),
+  batchProgress: document.getElementById("batch-progress"),
+  batchProgressBar: document.getElementById("batch-progress-bar"),
+  batchProgressText: document.getElementById("batch-progress-text"),
 };
 
 const state = {
   storage: null,
-  selectedFile: null,
+  queue: [],
   uploadTask: null,
   busy: false,
 };
 
 /**
- * Initialize KOCloud Companion V0.1.
+ * Initialize KOCloud Companion multi-file upload.
  */
 function init() {
   elements.clientId.value = googleAuth.getClientId();
 
   setDisconnectedState();
+  renderQueue();
 
   elements.saveClientId.addEventListener(
     "click",
@@ -47,21 +53,26 @@ function init() {
     handleConnectGoogle
   );
 
-  elements.bookFile.addEventListener(
+  elements.bookFiles.addEventListener(
     "change",
     handleBookSelection
   );
 
-  elements.uploadBook.addEventListener(
+  elements.clearQueue.addEventListener(
     "click",
-    handleUploadBook
+    handleClearQueue
+  );
+
+  elements.uploadAll.addEventListener(
+    "click",
+    handleUploadAll
   );
 
   googleAuth.subscribe(handleAuthEvent);
 }
 
 /**
- * Save the user's Web OAuth Client ID locally in this browser.
+ * Save the Web OAuth Client ID in this browser.
  */
 function handleSaveClientId() {
   clearMessage(elements.authMessage);
@@ -86,7 +97,7 @@ function handleSaveClientId() {
 }
 
 /**
- * Connect to Google and resolve the existing KOCloud Books storage.
+ * Connect to Google Drive and resolve existing KOCloud storage.
  */
 async function handleConnectGoogle() {
   if (state.busy) {
@@ -126,8 +137,7 @@ async function handleConnectGoogle() {
     "disconnected"
   );
 
-  elements.connectGoogle.textContent =
-    "Connecting…";
+  elements.connectGoogle.textContent = "Connecting…";
 
   try {
     const accessToken = await googleAuth.connect();
@@ -179,52 +189,75 @@ async function handleConnectGoogle() {
 }
 
 /**
- * Handle an ebook selected by the user.
+ * Add supported selected files to the upload queue.
  */
 function handleBookSelection() {
   clearMessage(elements.uploadMessage);
-  resetProgress();
 
-  const file =
-    elements.bookFile.files?.[0] || null;
+  const files = Array.from(
+    elements.bookFiles.files || []
+  );
 
-  if (!file) {
-    clearSelectedBook();
+  if (files.length === 0) {
     return;
   }
 
-  if (!googleDriveApi.isSupportedBook(file)) {
-    elements.bookFile.value = "";
-    clearSelectedBook();
+  const supported = [];
+  const rejected = [];
 
+  for (const file of files) {
+    if (googleDriveApi.isSupportedBook(file)) {
+      supported.push(file);
+    } else {
+      rejected.push(file.name);
+    }
+  }
+
+  for (const file of supported) {
+    state.queue.push(createQueueItem(file));
+  }
+
+  // Reset the file input so choosing the same file again can create another
+  // queue item intentionally.
+  elements.bookFiles.value = "";
+
+  renderQueue();
+
+  if (rejected.length > 0) {
     setMessage(
       elements.uploadMessage,
-      "Only EPUB and PDF files are supported.",
+      `${rejected.length} unsupported file` +
+        `${rejected.length === 1 ? " was" : "s were"} skipped. ` +
+        "Only EPUB and PDF files are supported.",
       "error"
     );
-    return;
   }
-
-  state.selectedFile = file;
-
-  elements.selectedBook.dataset.state = "ready";
-  elements.selectedBook.textContent =
-    `${file.name} · ${formatBytes(file.size)}`;
-
-  updateUploadButton();
 }
 
 /**
- * Upload the selected ebook directly from this browser to Google Drive.
+ * Remove every queued item when no upload is running.
  */
-async function handleUploadBook() {
+function handleClearQueue() {
   if (state.busy) {
     return;
   }
 
-  const file = state.selectedFile;
-  const storage = state.storage;
+  state.queue = [];
+  resetBatchProgress();
+  clearMessage(elements.uploadMessage);
+  renderQueue();
+}
+
+/**
+ * Upload all waiting/error items sequentially.
+ */
+async function handleUploadAll() {
+  if (state.busy) {
+    return;
+  }
+
   const accessToken = googleAuth.getAccessToken();
+  const booksFolderId = state.storage?.books?.id;
 
   if (!accessToken) {
     setMessage(
@@ -235,7 +268,7 @@ async function handleUploadBook() {
     return;
   }
 
-  if (!storage?.books?.id) {
+  if (!booksFolderId) {
     setMessage(
       elements.uploadMessage,
       "KOCloud Books storage is not ready. Connect Google Drive again.",
@@ -244,93 +277,366 @@ async function handleUploadBook() {
     return;
   }
 
-  if (!file) {
+  const pendingItems = state.queue.filter(
+    (item) =>
+      item.status === "waiting" ||
+      item.status === "error"
+  );
+
+  if (pendingItems.length === 0) {
     setMessage(
       elements.uploadMessage,
-      "Choose an EPUB or PDF first.",
-      "error"
+      "There are no books waiting to upload."
     );
     return;
   }
 
   setBusy(true);
   clearMessage(elements.uploadMessage);
-  showProgress(0);
 
-  elements.uploadBook.textContent =
-    "Preparing upload…";
+  for (const item of pendingItems) {
+    item.status = "waiting";
+    item.progress = 0;
+    item.error = "";
+    item.uploadedFile = null;
+  }
+
+  renderQueue();
+  updateBatchProgress();
+
+  let succeeded = 0;
+  let failed = 0;
 
   try {
-    const sessionUrl =
-      await googleDriveApi.createBookUploadSession(
-        accessToken,
-        file,
-        storage.books.id
-      );
+    for (const item of pendingItems) {
+      const currentToken = googleAuth.getAccessToken();
 
-    const mimeType =
-      googleDriveApi.getBookMimeType(file);
-
-    const task = new BrowserUploadTask(
-      sessionUrl,
-      file,
-      mimeType
-    );
-
-    state.uploadTask = task;
-    elements.uploadBook.textContent =
-      "Uploading…";
-
-    const uploadedFile = await task.start(
-      ({ loaded, total, percent }) => {
-        showProgress(percent, loaded, total);
+      if (!currentToken) {
+        item.status = "error";
+        item.error =
+          "Google authorization is no longer available.";
+        failed += 1;
+        renderQueue();
+        continue;
       }
-    );
 
-    state.uploadTask = null;
+      item.status = "uploading";
+      item.progress = 0;
+      item.error = "";
 
-    showProgress(100, file.size, file.size);
+      renderQueue();
+      updateBatchProgress();
 
-    setMessage(
-      elements.uploadMessage,
-      `${uploadedFile.name || file.name} uploaded to KOCloud.`,
-      "success"
-    );
+      try {
+        const sessionUrl =
+          await googleDriveApi.createBookUploadSession(
+            currentToken,
+            item.file,
+            booksFolderId
+          );
 
-    // Clear the picker after a successful upload so an accidental second tap
-    // cannot upload the same file again.
-    elements.bookFile.value = "";
-    state.selectedFile = null;
+        const task = new BrowserUploadTask(
+          sessionUrl,
+          item.file,
+          googleDriveApi.getBookMimeType(item.file)
+        );
 
-    elements.selectedBook.dataset.state = "";
-    elements.selectedBook.textContent =
-      "No book selected.";
-  } catch (error) {
-    state.uploadTask = null;
+        state.uploadTask = task;
 
-    if (error instanceof UploadCancelledError) {
-      setMessage(
-        elements.uploadMessage,
-        "Upload cancelled."
-      );
-    } else {
-      setMessage(
-        elements.uploadMessage,
-        formatUploadError(error),
-        "error"
-      );
+        const uploadedFile = await task.start(
+          ({ percent }) => {
+            item.progress = percent;
+            updateQueueItemElement(item);
+            updateBatchProgress();
+          }
+        );
+
+        state.uploadTask = null;
+
+        item.progress = 100;
+        item.status = "done";
+        item.uploadedFile = uploadedFile;
+        succeeded += 1;
+      } catch (error) {
+        state.uploadTask = null;
+
+        item.status = "error";
+        item.error =
+          error instanceof UploadCancelledError
+            ? "Upload cancelled."
+            : formatUploadError(error);
+
+        failed += 1;
+      }
+
+      renderQueue();
+      updateBatchProgress();
     }
   } finally {
-    elements.uploadBook.textContent =
-      "Upload book";
-
+    state.uploadTask = null;
     setBusy(false);
-    updateUploadButton();
+    renderQueue();
+    updateBatchProgress();
+  }
+
+  if (failed === 0) {
+    setMessage(
+      elements.uploadMessage,
+      `${succeeded} book` +
+        `${succeeded === 1 ? "" : "s"} uploaded to KOCloud.`,
+      "success"
+    );
+  } else if (succeeded === 0) {
+    setMessage(
+      elements.uploadMessage,
+      `Upload failed for ${failed} book` +
+        `${failed === 1 ? "" : "s"}.`,
+      "error"
+    );
+  } else {
+    setMessage(
+      elements.uploadMessage,
+      `${succeeded} uploaded, ${failed} failed. ` +
+        "Press Upload books again to retry failed items.",
+      "error"
+    );
   }
 }
 
 /**
- * Keep UI state synchronized with auth events.
+ * Create a queue model item for one File.
+ *
+ * @param {File} file
+ * @returns {object}
+ */
+function createQueueItem(file) {
+  return {
+    id:
+      globalThis.crypto?.randomUUID?.() ||
+      `${Date.now()}-${Math.random()}`,
+    file,
+    status: "waiting",
+    progress: 0,
+    error: "",
+    uploadedFile: null,
+  };
+}
+
+/**
+ * Render the whole upload queue.
+ */
+function renderQueue() {
+  const count = state.queue.length;
+
+  elements.queueEmpty.hidden = count > 0;
+  elements.uploadQueue.hidden = count === 0;
+
+  elements.queueSummary.textContent =
+    `${count} book${count === 1 ? "" : "s"} selected`;
+
+  elements.queueList.replaceChildren();
+
+  for (const item of state.queue) {
+    elements.queueList.append(
+      createQueueItemElement(item)
+    );
+  }
+
+  updateControls();
+}
+
+/**
+ * Create the DOM element for one queue item.
+ *
+ * @param {object} item
+ * @returns {HTMLLIElement}
+ */
+function createQueueItemElement(item) {
+  const li = document.createElement("li");
+  li.className = "queue-item";
+  li.dataset.queueId = item.id;
+  li.dataset.state = item.status;
+
+  const main = document.createElement("div");
+  main.className = "queue-item-main";
+
+  const name = document.createElement("div");
+  name.className = "queue-item-name";
+  name.textContent = item.file.name;
+
+  const size = document.createElement("div");
+  size.className = "queue-item-size";
+  size.textContent = formatBytes(item.file.size);
+
+  main.append(name, size);
+
+  const status = document.createElement("div");
+  status.className = "queue-item-status";
+  status.textContent = getQueueStatusText(item);
+
+  const progress = document.createElement("div");
+  progress.className = "queue-item-progress";
+  progress.hidden =
+    item.status !== "uploading" &&
+    item.status !== "done";
+
+  const progressBar =
+    document.createElement("progress");
+  progressBar.max = 100;
+  progressBar.value = item.progress;
+
+  const percent = document.createElement("span");
+  percent.className = "queue-item-percent";
+  percent.textContent = `${item.progress}%`;
+
+  progress.append(progressBar, percent);
+
+  const error = document.createElement("div");
+  error.className = "queue-item-error";
+  error.textContent = item.error;
+
+  li.append(main, status, progress, error);
+
+  return li;
+}
+
+/**
+ * Update only the DOM for one queue item during progress events.
+ *
+ * @param {object} item
+ */
+function updateQueueItemElement(item) {
+  const row = elements.queueList.querySelector(
+    `[data-queue-id="${CSS.escape(item.id)}"]`
+  );
+
+  if (!row) {
+    return;
+  }
+
+  row.dataset.state = item.status;
+
+  const status = row.querySelector(
+    ".queue-item-status"
+  );
+
+  const progressRegion = row.querySelector(
+    ".queue-item-progress"
+  );
+
+  const progressBar = row.querySelector(
+    "progress"
+  );
+
+  const percent = row.querySelector(
+    ".queue-item-percent"
+  );
+
+  const error = row.querySelector(
+    ".queue-item-error"
+  );
+
+  if (status) {
+    status.textContent = getQueueStatusText(item);
+  }
+
+  if (progressRegion) {
+    progressRegion.hidden =
+      item.status !== "uploading" &&
+      item.status !== "done";
+  }
+
+  if (progressBar) {
+    progressBar.value = item.progress;
+  }
+
+  if (percent) {
+    percent.textContent = `${item.progress}%`;
+  }
+
+  if (error) {
+    error.textContent = item.error;
+  }
+}
+
+/**
+ * Return user-visible text for a queue state.
+ *
+ * @param {object} item
+ * @returns {string}
+ */
+function getQueueStatusText(item) {
+  switch (item.status) {
+    case "uploading":
+      return "Uploading…";
+    case "done":
+      return "Uploaded";
+    case "error":
+      return "Failed";
+    default:
+      return "Waiting";
+  }
+}
+
+/**
+ * Update total batch progress using byte-weighted progress.
+ */
+function updateBatchProgress() {
+  if (state.queue.length === 0) {
+    resetBatchProgress();
+    return;
+  }
+
+  const totalBytes = state.queue.reduce(
+    (sum, item) => sum + item.file.size,
+    0
+  );
+
+  const loadedBytes = state.queue.reduce(
+    (sum, item) => {
+      if (item.status === "done") {
+        return sum + item.file.size;
+      }
+
+      return (
+        sum +
+        item.file.size * (item.progress / 100)
+      );
+    },
+    0
+  );
+
+  const percent =
+    totalBytes > 0
+      ? Math.min(
+          100,
+          Math.round(
+            (loadedBytes / totalBytes) * 100
+          )
+        )
+      : 0;
+
+  const doneCount = state.queue.filter(
+    (item) => item.status === "done"
+  ).length;
+
+  elements.batchProgress.hidden = false;
+  elements.batchProgressBar.value = percent;
+  elements.batchProgressText.textContent =
+    `${percent}% · ${doneCount}/${state.queue.length}`;
+}
+
+/**
+ * Hide and reset total batch progress.
+ */
+function resetBatchProgress() {
+  elements.batchProgress.hidden = true;
+  elements.batchProgressBar.value = 0;
+  elements.batchProgressText.textContent = "0%";
+}
+
+/**
+ * Keep UI synchronized with auth events.
  *
  * @param {object} event
  */
@@ -353,14 +659,14 @@ function handleAuthEvent(event) {
 }
 
 /**
- * Enable the upload area after KOCloud storage is resolved.
+ * Enable the file picker when Google Drive storage is ready.
  */
 function enableBookSelection() {
-  elements.bookFile.disabled = false;
+  elements.bookFiles.disabled = false;
 
   const pickerLabel =
     document.querySelector(
-      'label[for="book-file"]'
+      'label[for="book-files"]'
     );
 
   if (pickerLabel) {
@@ -370,19 +676,19 @@ function enableBookSelection() {
     );
   }
 
-  updateUploadButton();
+  updateControls();
 }
 
 /**
- * Disable upload controls until Google Drive + KOCloud storage are ready.
+ * Disable upload controls until Google Drive is ready.
  */
 function disableBookSelection() {
-  elements.bookFile.disabled = true;
-  elements.uploadBook.disabled = true;
+  elements.bookFiles.disabled = true;
+  elements.uploadAll.disabled = true;
 
   const pickerLabel =
     document.querySelector(
-      'label[for="book-file"]'
+      'label[for="book-files"]'
     );
 
   if (pickerLabel) {
@@ -394,7 +700,7 @@ function disableBookSelection() {
 }
 
 /**
- * Reset UI to disconnected state.
+ * Reset auth-related UI to disconnected state.
  */
 function setDisconnectedState() {
   setConnectionStatus(
@@ -405,35 +711,11 @@ function setDisconnectedState() {
   state.storage = null;
 
   disableBookSelection();
-  updateUploadButton();
+  updateControls();
 }
 
 /**
- * Clear the selected ebook from state and UI.
- */
-function clearSelectedBook() {
-  state.selectedFile = null;
-
-  elements.selectedBook.dataset.state = "";
-  elements.selectedBook.textContent =
-    "No book selected.";
-
-  updateUploadButton();
-}
-
-/**
- * Update whether the Upload button is currently usable.
- */
-function updateUploadButton() {
-  elements.uploadBook.disabled =
-    state.busy ||
-    !googleAuth.isConnected() ||
-    !state.storage?.books?.id ||
-    !state.selectedFile;
-}
-
-/**
- * Mark the UI busy while OAuth/storage resolution/upload is running.
+ * Mark UI busy while OAuth or upload work is running.
  *
  * @param {boolean} busy
  */
@@ -442,17 +724,57 @@ function setBusy(busy) {
 
   elements.saveClientId.disabled = busy;
   elements.connectGoogle.disabled = busy;
+  elements.clearQueue.disabled = busy;
 
   if (busy) {
-    elements.bookFile.disabled = true;
+    elements.bookFiles.disabled = true;
   } else if (
     googleAuth.isConnected() &&
     state.storage?.books?.id
   ) {
-    elements.bookFile.disabled = false;
+    elements.bookFiles.disabled = false;
   }
 
-  updateUploadButton();
+  updateControls();
+}
+
+/**
+ * Update queue-related controls.
+ */
+function updateControls() {
+  const canUpload =
+    !state.busy &&
+    googleAuth.isConnected() &&
+    Boolean(state.storage?.books?.id) &&
+    state.queue.some(
+      (item) =>
+        item.status === "waiting" ||
+        item.status === "error"
+    );
+
+  elements.uploadAll.disabled = !canUpload;
+  elements.clearQueue.disabled =
+    state.busy || state.queue.length === 0;
+
+  if (state.busy) {
+    elements.uploadAll.textContent = "Uploading…";
+  } else {
+    const retryCount = state.queue.filter(
+      (item) => item.status === "error"
+    ).length;
+
+    const waitingCount = state.queue.filter(
+      (item) => item.status === "waiting"
+    ).length;
+
+    const uploadable = waitingCount + retryCount;
+
+    elements.uploadAll.textContent =
+      uploadable > 0
+        ? `Upload ${uploadable} book` +
+          `${uploadable === 1 ? "" : "s"}`
+        : "Upload books";
+  }
 }
 
 /**
@@ -471,49 +793,7 @@ function setConnectionStatus(
 }
 
 /**
- * Show a progress value.
- *
- * @param {number} percent
- * @param {number|null} loaded
- * @param {number|null} total
- */
-function showProgress(
-  percent,
-  loaded = null,
-  total = null
-) {
-  const safePercent =
-    Math.max(0, Math.min(100, percent));
-
-  elements.progressRegion.hidden = false;
-  elements.progressBar.value = safePercent;
-
-  if (
-    Number.isFinite(loaded) &&
-    Number.isFinite(total) &&
-    total > 0
-  ) {
-    elements.progressText.textContent =
-      `${safePercent}% · ` +
-      `${formatBytes(loaded)} / ` +
-      `${formatBytes(total)}`;
-  } else {
-    elements.progressText.textContent =
-      `${safePercent}%`;
-  }
-}
-
-/**
- * Hide and reset progress UI.
- */
-function resetProgress() {
-  elements.progressRegion.hidden = true;
-  elements.progressBar.value = 0;
-  elements.progressText.textContent = "0%";
-}
-
-/**
- * Set user-visible helper/error/success text.
+ * Set a user-visible message.
  *
  * @param {HTMLElement} element
  * @param {string} text
@@ -543,7 +823,7 @@ function clearMessage(element) {
 }
 
 /**
- * Format a byte count for UI.
+ * Format byte count for UI.
  *
  * @param {number} bytes
  * @returns {string}
@@ -583,7 +863,7 @@ function formatBytes(bytes) {
 }
 
 /**
- * Return a concise error message from unknown thrown values.
+ * Return a concise message from an unknown thrown value.
  *
  * @param {unknown} error
  * @returns {string}
@@ -630,7 +910,7 @@ function formatConnectError(error) {
 }
 
 /**
- * Add reconnect guidance for expired/invalid Google access tokens.
+ * Add reconnect guidance for expired/invalid tokens.
  *
  * @param {unknown} error
  * @returns {string}
@@ -644,7 +924,7 @@ function formatUploadError(error) {
     message.includes("invalid_token")
   ) {
     return (
-      `${message} Connect Google Drive again and retry the upload.`
+      `${message} Connect Google Drive again and retry the failed upload.`
     );
   }
 
