@@ -303,16 +303,26 @@ async function handleOpenDrivePicker() {
         ...book,
         importStatus: "selected",
         importMessage: "",
+        duplicateAction: "skip",
+        existingFile: null,
       })
     );
 
-    renderDriveSelection();
+    const duplicateCount =
+      await refreshDriveImportDuplicateStates();
+
+    const duplicateText =
+      duplicateCount > 0
+        ? ` ${duplicateCount} duplicate` +
+          `${duplicateCount === 1 ? "" : "s"} found; ` +
+          "choose Skip, Replace, or Keep both."
+        : " Ready to import into KOCloud/Books.";
 
     setMessage(
       elements.driveImportMessage,
       `${selectedBooks.length} Drive book` +
-        `${selectedBooks.length === 1 ? "" : "s"} selected. ` +
-        "Ready to import into KOCloud/Books.",
+        `${selectedBooks.length === 1 ? "" : "s"} selected.` +
+        duplicateText,
       "success"
     );
   } catch (error) {
@@ -327,6 +337,114 @@ async function handleOpenDrivePicker() {
 
     updateDriveImportControls();
   }
+}
+
+/**
+ * Compare Drive-import selections with KOCloud/Books and with each other.
+ *
+ * @returns {Promise<number>} duplicate item count
+ */
+async function refreshDriveImportDuplicateStates() {
+  const accessToken = googleAuth.getAccessToken();
+  const booksFolderId = state.storage?.books?.id;
+
+  if (!accessToken || !booksFolderId) {
+    renderDriveSelection();
+    return 0;
+  }
+
+  const existingBooks =
+    await googleDriveApi.listManagedBooks(
+      accessToken,
+      booksFolderId
+    );
+
+  const existingByName = new Map();
+
+  for (const existingBook of existingBooks) {
+    const key =
+      normalizeBookName(existingBook.name);
+
+    if (!existingByName.has(key)) {
+      existingByName.set(
+        key,
+        existingBook
+      );
+    }
+  }
+
+  const seenSelectionNames = new Set();
+  let duplicateCount = 0;
+
+  for (const book of state.driveSelection) {
+    if (
+      book.importStatus === "done" ||
+      book.importStatus === "replaced"
+    ) {
+      continue;
+    }
+
+    const key = normalizeBookName(book.name);
+    const existingFile =
+      existingByName.get(key) || null;
+
+    const duplicateInSelection =
+      seenSelectionNames.has(key);
+
+    if (existingFile || duplicateInSelection) {
+      book.existingFile = existingFile;
+      book.importStatus = "duplicate";
+      book.importMessage = "";
+
+      if (
+        book.duplicateAction !== "replace" &&
+        book.duplicateAction !== "keep-both"
+      ) {
+        book.duplicateAction = "skip";
+      }
+
+      duplicateCount += 1;
+    } else {
+      book.existingFile = null;
+      book.importStatus = "selected";
+      book.importMessage = "";
+      book.duplicateAction = "skip";
+    }
+
+    seenSelectionNames.add(key);
+  }
+
+  renderDriveSelection();
+  return duplicateCount;
+}
+
+/**
+ * Change the selected action for one Drive-import duplicate.
+ *
+ * @param {string} fileId
+ * @param {"skip"|"replace"|"keep-both"} action
+ */
+function setDriveImportDuplicateAction(
+  fileId,
+  action
+) {
+  if (state.busy || state.driveImporting) {
+    return;
+  }
+
+  const book = state.driveSelection.find(
+    (candidate) => candidate.id === fileId
+  );
+
+  if (
+    !book ||
+    book.importStatus !== "duplicate"
+  ) {
+    return;
+  }
+
+  book.duplicateAction = action;
+  renderDriveSelection();
 }
 
 /**
@@ -363,6 +481,9 @@ function renderDriveSelection() {
   for (const book of books) {
     const item = document.createElement("li");
     item.className = "queue-item";
+    item.dataset.state = book.importStatus;
+    item.dataset.duplicateAction =
+      book.duplicateAction || "skip";
 
     const main = document.createElement("div");
     main.className = "queue-item-main";
@@ -383,7 +504,10 @@ function renderDriveSelection() {
     status.textContent =
       getDriveImportStatusText(book);
 
-    if (book.importStatus === "done") {
+    if (
+      book.importStatus === "done" ||
+      book.importStatus === "replaced"
+    ) {
       status.classList.add("status-success");
     } else if (
       book.importStatus === "error" ||
@@ -392,7 +516,55 @@ function renderDriveSelection() {
       status.classList.add("status-error");
     }
 
-    item.append(main, status);
+    const actions =
+      document.createElement("div");
+    actions.className = "queue-item-actions";
+    actions.hidden =
+      book.importStatus !== "duplicate";
+
+    if (book.importStatus === "duplicate") {
+      for (const action of [
+        {
+          id: "skip",
+          label: "Skip",
+        },
+        {
+          id: "replace",
+          label: "Replace",
+        },
+        {
+          id: "keep-both",
+          label: "Keep both",
+        },
+      ]) {
+        const button =
+          document.createElement("button");
+
+        button.type = "button";
+        button.className =
+          "queue-action-button";
+        button.dataset.action = action.id;
+        button.textContent = action.label;
+        button.disabled =
+          state.busy ||
+          state.driveImporting ||
+          book.duplicateAction === action.id;
+
+        button.addEventListener(
+          "click",
+          () => {
+            setDriveImportDuplicateAction(
+              book.id,
+              action.id
+            );
+          }
+        );
+
+        actions.append(button);
+      }
+    }
+
+    item.append(main, status, actions);
     elements.driveSelectionList.append(item);
   }
 
@@ -418,6 +590,8 @@ function updateDriveImportControls() {
     state.driveSelection.some(
       (book) =>
         book.importStatus !== "done" &&
+        book.importStatus !== "replaced" &&
+        book.importStatus !== "skipped" &&
         book.importStatus !== "blocked"
     );
 
@@ -463,6 +637,8 @@ async function handleImportDriveBooks() {
     state.driveSelection.filter(
       (book) =>
         book.importStatus !== "done" &&
+        book.importStatus !== "replaced" &&
+        book.importStatus !== "skipped" &&
         book.importStatus !== "blocked"
     );
 
@@ -475,19 +651,73 @@ async function handleImportDriveBooks() {
   updateDriveImportControls();
 
   let importedCount = 0;
+  let replacedCount = 0;
+  let skippedCount = 0;
   let blockedCount = 0;
   let failedCount = 0;
 
   try {
+    // Re-read the destination immediately before import so duplicate
+    // decisions remain correct if KOCloud changed after Picker selection.
+    const existingBooks =
+      await googleDriveApi.listManagedBooks(
+        accessToken,
+        booksFolderId
+      );
+
+    const existingByName = new Map();
+
+    for (const existingBook of existingBooks) {
+      const key =
+        normalizeBookName(existingBook.name);
+
+      if (!existingByName.has(key)) {
+        existingByName.set(
+          key,
+          existingBook
+        );
+      }
+    }
+
     for (const book of pendingBooks) {
+      const normalizedName =
+        normalizeBookName(book.name);
+
+      const cloudExisting =
+        existingByName.get(normalizedName) ||
+        null;
+
+      book.existingFile = cloudExisting;
+
+      if (
+        cloudExisting &&
+        book.duplicateAction === "skip"
+      ) {
+        book.importStatus = "skipped";
+        book.importMessage =
+          "Skipped · already exists";
+        skippedCount += 1;
+        renderDriveSelection();
+        continue;
+      }
+
       book.importStatus = "checking";
       book.importMessage = "";
       renderDriveSelection();
 
       try {
+        const currentToken =
+          googleAuth.getAccessToken();
+
+        if (!currentToken) {
+          throw new Error(
+            "Google authorization is no longer available."
+          );
+        }
+
         const source =
           await googleDriveApi.getImportSource(
-            accessToken,
+            currentToken,
             book.id
           );
 
@@ -504,22 +734,106 @@ async function handleImportDriveBooks() {
           continue;
         }
 
+        const refreshedName =
+          normalizeBookName(book.name);
+
+        const refreshedExisting =
+          existingByName.get(refreshedName) ||
+          cloudExisting;
+
+        if (
+          refreshedExisting &&
+          book.duplicateAction === "skip"
+        ) {
+          book.importStatus = "skipped";
+          book.importMessage =
+            "Skipped · already exists";
+          skippedCount += 1;
+          renderDriveSelection();
+          continue;
+        }
+
+        const isReplace =
+          Boolean(refreshedExisting) &&
+          book.duplicateAction === "replace";
+
+        const isKeepBoth =
+          Boolean(refreshedExisting) &&
+          book.duplicateAction === "keep-both";
+
+        let driveName = book.name;
+
+        if (isKeepBoth) {
+          driveName = createAvailableBookName(
+            book.name,
+            existingByName
+          );
+        }
+
         book.importStatus = "importing";
         book.importMessage =
-          "Copying directly in Google Drive…";
+          isReplace
+            ? "Copying replacement in Google Drive…"
+            : "Copying directly in Google Drive…";
         renderDriveSelection();
 
-        await googleDriveApi.copyBookToFolder(
-          accessToken,
-          book.id,
-          booksFolderId,
-          book.name
-        );
+        const copiedFile =
+          await googleDriveApi.copyBookToFolder(
+            currentToken,
+            book.id,
+            booksFolderId,
+            driveName
+          );
 
-        book.importStatus = "done";
-        book.importMessage =
-          "Imported to KOCloud/Books";
-        importedCount += 1;
+        if (isReplace) {
+          try {
+            await googleDriveApi.trashFile(
+              currentToken,
+              refreshedExisting.id
+            );
+          } catch (replaceError) {
+            // Best-effort rollback: keep the old book as the live copy if
+            // removing it failed after the new copy was created.
+            try {
+              await googleDriveApi.trashFile(
+                currentToken,
+                copiedFile.id
+              );
+            } catch {
+              // Preserve the original Drive error below. A library refresh
+              // will reveal any remaining duplicate so it can be repaired.
+            }
+
+            throw new Error(
+              "Replacement copy was created, but the old book " +
+                "could not be moved to Trash: " +
+                getErrorMessage(replaceError)
+            );
+          }
+
+          book.importStatus = "replaced";
+          book.importMessage =
+            "Replaced · old copy moved to Trash";
+          book.existingFile = copiedFile;
+          replacedCount += 1;
+
+          existingByName.set(
+            refreshedName,
+            copiedFile
+          );
+        } else {
+          book.importStatus = "done";
+          book.importMessage =
+            driveName === book.name
+              ? "Imported to KOCloud/Books"
+              : `Imported as ${driveName}`;
+          importedCount += 1;
+
+          existingByName.set(
+            normalizeBookName(driveName),
+            copiedFile
+          );
+        }
       } catch (error) {
         book.importStatus = "error";
         book.importMessage =
@@ -530,7 +844,10 @@ async function handleImportDriveBooks() {
       renderDriveSelection();
     }
 
-    if (importedCount > 0) {
+    if (
+      importedCount > 0 ||
+      replacedCount > 0
+    ) {
       await loadLibrary();
     }
 
@@ -539,6 +856,18 @@ async function handleImportDriveBooks() {
     if (importedCount > 0) {
       parts.push(
         `${importedCount} imported`
+      );
+    }
+
+    if (replacedCount > 0) {
+      parts.push(
+        `${replacedCount} replaced`
+      );
+    }
+
+    if (skippedCount > 0) {
+      parts.push(
+        `${skippedCount} skipped`
       );
     }
 
@@ -564,6 +893,12 @@ async function handleImportDriveBooks() {
       message,
       failedCount > 0 ? "error" : "success"
     );
+  } catch (error) {
+    setMessage(
+      elements.driveImportMessage,
+      `Could not prepare Drive import: ${getErrorMessage(error)}`,
+      "error"
+    );
   } finally {
     state.driveImporting = false;
     updateDriveImportControls();
@@ -583,12 +918,26 @@ function getDriveImportStatusText(book) {
   }
 
   switch (book.importStatus) {
+    case "duplicate":
+      if (book.duplicateAction === "replace") {
+        return "Already exists · Replace selected";
+      }
+
+      if (book.duplicateAction === "keep-both") {
+        return "Already exists · Keep both selected";
+      }
+
+      return "Already exists · Skip selected";
     case "checking":
       return "Checking copy permission…";
     case "importing":
       return "Importing…";
     case "done":
       return "Imported to KOCloud/Books";
+    case "replaced":
+      return "Replaced";
+    case "skipped":
+      return "Skipped · already exists";
     case "blocked":
       return "This file cannot be copied";
     case "error":

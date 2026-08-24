@@ -310,6 +310,50 @@ export class GoogleDriveApi {
   }
 
   /**
+   * Move a Drive file to Trash.
+   *
+   * @param {string} accessToken
+   * @param {string} fileId
+   * @returns {Promise<object>}
+   */
+  async trashFile(
+    accessToken,
+    fileId
+  ) {
+    const safeFileId =
+      encodeURIComponent(fileId);
+
+    const params = new URLSearchParams({
+      supportsAllDrives: "true",
+      fields: "id,trashed",
+    });
+
+    const response = await fetch(
+      `${DRIVE_FILES_URL}/${safeFileId}?${params}`,
+      {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type":
+            "application/json; charset=UTF-8",
+        },
+        body: JSON.stringify({
+          trashed: true,
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      await throwDriveError(
+        response,
+        "Move old book to Trash"
+      );
+    }
+
+    return response.json();
+  }
+
+  /**
    * Create a resumable upload session for one KOCloud book.
    *
    * The browser will PUT ebook bytes directly to the returned session URL.
