@@ -24,6 +24,14 @@ const elements = {
     document.getElementById("drive-selection-list"),
   clearDriveSelection:
     document.getElementById("clear-drive-selection"),
+  driveImportDestination:
+    document.getElementById("drive-import-destination"),
+  newBookFolderName:
+    document.getElementById("new-book-folder-name"),
+  createBookFolder:
+    document.getElementById("create-book-folder"),
+  destinationMessage:
+    document.getElementById("destination-message"),
   importDriveBooks:
     document.getElementById("import-drive-books"),
   driveImportMessage:
@@ -60,6 +68,10 @@ const state = {
   libraryLoading: false,
   driveSelection: [],
   driveImporting: false,
+  driveFolders: [],
+  driveFoldersLoading: false,
+  driveDestinationId: "",
+  driveDestinationName: "Books",
 };
 
 /**
@@ -119,6 +131,26 @@ function init() {
   elements.importDriveBooks.addEventListener(
     "click",
     handleImportDriveBooks
+  );
+
+  elements.driveImportDestination.addEventListener(
+    "change",
+    handleDriveDestinationChange
+  );
+
+  elements.createBookFolder.addEventListener(
+    "click",
+    handleCreateBookFolder
+  );
+
+  elements.newBookFolderName.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        handleCreateBookFolder();
+      }
+    }
   );
 
   googleAuth.subscribe(handleAuthEvent);
@@ -225,7 +257,8 @@ async function handleConnectGoogle() {
     );
 
     enableBookSelection();
-    updateDriveImportControls();
+
+    await loadDriveImportFolders();
 
     if (state.queue.length > 0) {
       await refreshDuplicateStates();
@@ -251,6 +284,286 @@ async function handleConnectGoogle() {
       "Connect Google Drive";
 
     setBusy(false);
+  }
+}
+
+/**
+ * Load direct child folders under KOCloud/Books for Drive import.
+ */
+async function loadDriveImportFolders() {
+  const accessToken = googleAuth.getAccessToken();
+  const booksFolderId = state.storage?.books?.id;
+
+  if (!accessToken || !booksFolderId) {
+    state.driveFolders = [];
+    state.driveDestinationId = "";
+    state.driveDestinationName = "Books";
+    renderDriveImportDestinations();
+    return;
+  }
+
+  state.driveFoldersLoading = true;
+  clearMessage(elements.destinationMessage);
+  updateDriveImportControls();
+
+  try {
+    state.driveFolders =
+      await googleDriveApi.listChildFolders(
+        accessToken,
+        booksFolderId
+      );
+
+    const selectedStillExists =
+      state.driveDestinationId &&
+      state.driveFolders.some(
+        (folder) =>
+          folder.id === state.driveDestinationId
+      );
+
+    if (!selectedStillExists) {
+      state.driveDestinationId = "";
+      state.driveDestinationName = "Books";
+    }
+
+    renderDriveImportDestinations();
+  } catch (error) {
+    state.driveFolders = [];
+    state.driveDestinationId = "";
+    state.driveDestinationName = "Books";
+    renderDriveImportDestinations();
+
+    setMessage(
+      elements.destinationMessage,
+      `Could not load book folders: ${getErrorMessage(error)}`,
+      "error"
+    );
+  } finally {
+    state.driveFoldersLoading = false;
+    updateDriveImportControls();
+  }
+}
+
+/**
+ * Render the direct KOCloud/Books destination list.
+ */
+function renderDriveImportDestinations() {
+  const select = elements.driveImportDestination;
+  const previousValue =
+    state.driveDestinationId || "";
+
+  select.replaceChildren();
+
+  const rootOption =
+    document.createElement("option");
+  rootOption.value = "";
+  rootOption.textContent =
+    "KOCloud / Books";
+  select.append(rootOption);
+
+  for (const folder of state.driveFolders) {
+    const option =
+      document.createElement("option");
+
+    option.value = folder.id;
+    option.textContent =
+      `KOCloud / Books / ${folder.name}`;
+    select.append(option);
+  }
+
+  select.value = previousValue;
+}
+
+/**
+ * Return the currently selected destination folder ID.
+ *
+ * @returns {string}
+ */
+function getDriveDestinationFolderId() {
+  return (
+    state.driveDestinationId ||
+    state.storage?.books?.id ||
+    ""
+  );
+}
+
+/**
+ * Return the current destination path for UI messages.
+ *
+ * @returns {string}
+ */
+function getDriveDestinationPath() {
+  if (!state.driveDestinationId) {
+    return "KOCloud/Books";
+  }
+
+  return (
+    "KOCloud/Books/" +
+    state.driveDestinationName
+  );
+}
+
+/**
+ * Switch Drive-import destination and recompute duplicate state there.
+ */
+async function handleDriveDestinationChange() {
+  if (
+    state.busy ||
+    state.driveImporting ||
+    state.driveFoldersLoading
+  ) {
+    return;
+  }
+
+  const folderId =
+    elements.driveImportDestination.value;
+
+  const folder =
+    state.driveFolders.find(
+      (candidate) =>
+        candidate.id === folderId
+    ) || null;
+
+  state.driveDestinationId =
+    folder?.id || "";
+
+  state.driveDestinationName =
+    folder?.name || "Books";
+
+  clearMessage(elements.destinationMessage);
+
+  if (state.driveSelection.length > 0) {
+    try {
+      await refreshDriveImportDuplicateStates();
+    } catch (error) {
+      setMessage(
+        elements.destinationMessage,
+        `Could not check destination duplicates: ${getErrorMessage(error)}`,
+        "error"
+      );
+    }
+  }
+
+  updateDriveImportControls();
+}
+
+/**
+ * Create one direct subfolder under KOCloud/Books and select it.
+ */
+async function handleCreateBookFolder() {
+  if (
+    state.busy ||
+    state.driveImporting ||
+    state.driveFoldersLoading
+  ) {
+    return;
+  }
+
+  const accessToken = googleAuth.getAccessToken();
+  const booksFolderId = state.storage?.books?.id;
+  const folderName =
+    elements.newBookFolderName.value.trim();
+
+  if (!accessToken || !booksFolderId) {
+    setMessage(
+      elements.destinationMessage,
+      "Connect Google Drive first.",
+      "error"
+    );
+    return;
+  }
+
+  if (!folderName) {
+    setMessage(
+      elements.destinationMessage,
+      "Enter a folder name first.",
+      "error"
+    );
+    elements.newBookFolderName.focus();
+    return;
+  }
+
+  const normalizedFolderName =
+    normalizeBookName(folderName);
+
+  const existingFolder =
+    state.driveFolders.find(
+      (folder) =>
+        normalizeBookName(folder.name) ===
+        normalizedFolderName
+    );
+
+  if (existingFolder) {
+    state.driveDestinationId =
+      existingFolder.id;
+    state.driveDestinationName =
+      existingFolder.name;
+
+    renderDriveImportDestinations();
+
+    setMessage(
+      elements.destinationMessage,
+      `Folder already exists. Selected ${getDriveDestinationPath()}.`,
+      "success"
+    );
+
+    if (state.driveSelection.length > 0) {
+      await refreshDriveImportDuplicateStates();
+    }
+
+    return;
+  }
+
+  state.driveFoldersLoading = true;
+  clearMessage(elements.destinationMessage);
+  updateDriveImportControls();
+
+  try {
+    const createdFolder =
+      await googleDriveApi.createBookFolder(
+        accessToken,
+        booksFolderId,
+        folderName
+      );
+
+    state.driveFolders.push(createdFolder);
+    state.driveFolders.sort(
+      (left, right) =>
+        left.name.localeCompare(
+          right.name,
+          undefined,
+          {
+            sensitivity: "base",
+            numeric: true,
+          }
+        )
+    );
+
+    state.driveDestinationId =
+      createdFolder.id;
+    state.driveDestinationName =
+      createdFolder.name;
+
+    elements.newBookFolderName.value = "";
+    renderDriveImportDestinations();
+
+    setMessage(
+      elements.destinationMessage,
+      `Created and selected ${getDriveDestinationPath()}.`,
+      "success"
+    );
+
+    if (state.driveSelection.length > 0) {
+      await refreshDriveImportDuplicateStates();
+    }
+  } catch (error) {
+    setMessage(
+      elements.destinationMessage,
+      getErrorMessage(error),
+      "error"
+    );
+  } finally {
+    state.driveFoldersLoading = false;
+    updateDriveImportControls();
   }
 }
 
@@ -346,9 +659,10 @@ async function handleOpenDrivePicker() {
  */
 async function refreshDriveImportDuplicateStates() {
   const accessToken = googleAuth.getAccessToken();
-  const booksFolderId = state.storage?.books?.id;
+  const destinationFolderId =
+    getDriveDestinationFolderId();
 
-  if (!accessToken || !booksFolderId) {
+  if (!accessToken || !destinationFolderId) {
     renderDriveSelection();
     return 0;
   }
@@ -356,7 +670,7 @@ async function refreshDriveImportDuplicateStates() {
   const existingBooks =
     await googleDriveApi.listManagedBooks(
       accessToken,
-      booksFolderId
+      destinationFolderId
     );
 
   const existingByName = new Map();
@@ -608,6 +922,22 @@ function updateDriveImportControls() {
     state.driveImporting
       ? "Importing…"
       : "Import selected books";
+
+  const destinationReady =
+    !state.busy &&
+    !state.driveImporting &&
+    !state.driveFoldersLoading &&
+    googleAuth.isConnected() &&
+    Boolean(state.storage?.books?.id);
+
+  elements.driveImportDestination.disabled =
+    !destinationReady;
+
+  elements.newBookFolderName.disabled =
+    !destinationReady;
+
+  elements.createBookFolder.disabled =
+    !destinationReady;
 }
 
 /**
@@ -622,12 +952,13 @@ async function handleImportDriveBooks() {
   }
 
   const accessToken = googleAuth.getAccessToken();
-  const booksFolderId = state.storage?.books?.id;
+  const destinationFolderId =
+    getDriveDestinationFolderId();
 
-  if (!accessToken || !booksFolderId) {
+  if (!accessToken || !destinationFolderId) {
     setMessage(
       elements.driveImportMessage,
-      "Connect Google Drive and resolve KOCloud/Books first.",
+      "Connect Google Drive and choose a destination first.",
       "error"
     );
     return;
@@ -662,7 +993,7 @@ async function handleImportDriveBooks() {
     const existingBooks =
       await googleDriveApi.listManagedBooks(
         accessToken,
-        booksFolderId
+        destinationFolderId
       );
 
     const existingByName = new Map();
@@ -781,7 +1112,7 @@ async function handleImportDriveBooks() {
           await googleDriveApi.copyBookToFolder(
             currentToken,
             book.id,
-            booksFolderId,
+            destinationFolderId,
             driveName
           );
 
@@ -825,8 +1156,8 @@ async function handleImportDriveBooks() {
           book.importStatus = "done";
           book.importMessage =
             driveName === book.name
-              ? "Imported to KOCloud/Books"
-              : `Imported as ${driveName}`;
+              ? `Imported to ${getDriveDestinationPath()}`
+              : `Imported as ${driveName} in ${getDriveDestinationPath()}`;
           importedCount += 1;
 
           existingByName.set(
@@ -845,8 +1176,11 @@ async function handleImportDriveBooks() {
     }
 
     if (
-      importedCount > 0 ||
-      replacedCount > 0
+      (
+        importedCount > 0 ||
+        replacedCount > 0
+      ) &&
+      !state.driveDestinationId
     ) {
       await loadLibrary();
     }
@@ -1932,6 +2266,10 @@ function handleAuthEvent(event) {
   if (event.type === "disconnected") {
     state.storage = null;
     state.libraryBooks = [];
+    state.driveFolders = [];
+    state.driveDestinationId = "";
+    state.driveDestinationName = "Books";
+    renderDriveImportDestinations();
     disableBookSelection();
     setDisconnectedState();
     renderLibrary();
@@ -1941,6 +2279,10 @@ function handleAuthEvent(event) {
   if (event.type === "error") {
     state.storage = null;
     state.libraryBooks = [];
+    state.driveFolders = [];
+    state.driveDestinationId = "";
+    state.driveDestinationName = "Books";
+    renderDriveImportDestinations();
     disableBookSelection();
 
     setConnectionStatus(
@@ -2005,6 +2347,10 @@ function setDisconnectedState() {
 
   state.storage = null;
   state.libraryBooks = [];
+  state.driveFolders = [];
+  state.driveDestinationId = "";
+  state.driveDestinationName = "Books";
+  renderDriveImportDestinations();
 
   disableBookSelection();
   updateControls();

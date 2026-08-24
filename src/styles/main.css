@@ -656,3 +656,33 @@ progress {
   }
 }
 
+
+
+/* Drive import destination */
+
+.destination-select {
+  width: 100%;
+  min-height: 46px;
+  padding: 11px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.destination-create {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.destination-create input {
+  min-width: 0;
+}
+
+@media (min-width: 640px) {
+  .destination-create {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+  }
+}

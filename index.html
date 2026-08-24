@@ -190,9 +190,44 @@
         <ul id="drive-selection-list" class="queue-list"></ul>
 
         <div class="upload-actions">
-          <div class="help-text">
-            Destination: <strong>KOCloud / Books</strong>
+          <label for="drive-import-destination">
+            Destination
+          </label>
+
+          <select
+            id="drive-import-destination"
+            class="destination-select"
+            disabled
+          >
+            <option value="">
+              KOCloud / Books
+            </option>
+          </select>
+
+          <div class="destination-create">
+            <input
+              id="new-book-folder-name"
+              type="text"
+              autocomplete="off"
+              placeholder="New folder name"
+              disabled
+            >
+
+            <button
+              id="create-book-folder"
+              type="button"
+              class="secondary-button"
+              disabled
+            >
+              Create folder
+            </button>
           </div>
+
+          <p
+            id="destination-message"
+            class="message"
+            aria-live="polite"
+          ></p>
 
           <button
             id="import-drive-books"

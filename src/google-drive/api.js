@@ -184,6 +184,102 @@ export class GoogleDriveApi {
   }
 
   /**
+   * List direct child folders inside one KOCloud book folder.
+   *
+   * @param {string} accessToken
+   * @param {string} parentFolderId
+   * @returns {Promise<Array<object>>}
+   */
+  async listChildFolders(
+    accessToken,
+    parentFolderId
+  ) {
+    const parentId =
+      escapeQueryValue(parentFolderId);
+
+    const query =
+      `'${parentId}' in parents ` +
+      "and trashed=false " +
+      `and mimeType='${FOLDER_MIME_TYPE}'`;
+
+    const folders = await this.listFiles(
+      accessToken,
+      query
+    );
+
+    return folders.sort((left, right) =>
+      left.name.localeCompare(
+        right.name,
+        undefined,
+        {
+          sensitivity: "base",
+          numeric: true,
+        }
+      )
+    );
+  }
+
+  /**
+   * Create a direct child folder inside KOCloud/Books.
+   *
+   * @param {string} accessToken
+   * @param {string} parentFolderId
+   * @param {string} name
+   * @returns {Promise<object>}
+   */
+  async createBookFolder(
+    accessToken,
+    parentFolderId,
+    name
+  ) {
+    const normalizedName = name.trim();
+
+    if (!normalizedName) {
+      throw new Error(
+        "Folder name cannot be empty."
+      );
+    }
+
+    const params = new URLSearchParams({
+      supportsAllDrives: "true",
+      fields:
+        "id,name,mimeType,parents,appProperties,modifiedTime",
+    });
+
+    const metadata = {
+      name: normalizedName,
+      mimeType: FOLDER_MIME_TYPE,
+      parents: [parentFolderId],
+      appProperties: {
+        [ROLE_KEY]: "book_folder",
+        [SCHEMA_KEY]: SCHEMA_VERSION,
+      },
+    };
+
+    const response = await fetch(
+      `${DRIVE_FILES_URL}?${params}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type":
+            "application/json; charset=UTF-8",
+        },
+        body: JSON.stringify(metadata),
+      }
+    );
+
+    if (!response.ok) {
+      await throwDriveError(
+        response,
+        "Create KOCloud book folder"
+      );
+    }
+
+    return response.json();
+  }
+
+  /**
    * List KOCloud-managed book files in the Books folder.
    *
    * @param {string} accessToken
