@@ -296,7 +296,8 @@ async function refreshDuplicateStates() {
       item.error = "";
 
       if (
-        item.duplicateAction !== "replace"
+        item.duplicateAction !== "replace" &&
+        item.duplicateAction !== "keep-both"
       ) {
         item.duplicateAction = "skip";
       }
@@ -323,7 +324,7 @@ async function refreshDuplicateStates() {
  * Change the action for one duplicate item.
  *
  * @param {string} queueId
- * @param {"skip"|"replace"} action
+ * @param {"skip"|"replace"|"keep-both"} action
  */
 function setDuplicateAction(queueId, action) {
   if (state.busy) {
@@ -446,7 +447,7 @@ async function handleUploadAll() {
       if (cloudExisting) {
         item.existingFile = cloudExisting;
 
-        if (item.duplicateAction !== "replace") {
+        if (item.duplicateAction === "skip") {
           item.status = "skipped";
           item.progress = 100;
           item.error = "";
@@ -484,9 +485,15 @@ async function handleUploadAll() {
 
       try {
         let sessionUrl;
+        let driveName = item.file.name;
+
         const isReplace =
           Boolean(cloudExisting) &&
           item.duplicateAction === "replace";
+
+        const isKeepBoth =
+          Boolean(cloudExisting) &&
+          item.duplicateAction === "keep-both";
 
         if (isReplace) {
           sessionUrl =
@@ -496,11 +503,19 @@ async function handleUploadAll() {
               cloudExisting.id
             );
         } else {
+          if (isKeepBoth) {
+            driveName = createAvailableBookName(
+              item.file.name,
+              existingByName
+            );
+          }
+
           sessionUrl =
             await googleDriveApi.createBookUploadSession(
               currentToken,
               item.file,
-              booksFolderId
+              booksFolderId,
+              driveName
             );
         }
 
@@ -537,17 +552,17 @@ async function handleUploadAll() {
           );
         } else {
           item.status = "done";
+          item.driveName =
+            uploadedFile.name || driveName;
           succeeded += 1;
 
           existingByName.set(
-            normalizedName,
+            normalizeBookName(item.driveName),
             uploadedFile.id
               ? uploadedFile
               : {
                   id: uploadedFile.id,
-                  name:
-                    uploadedFile.name ||
-                    item.file.name,
+                  name: item.driveName,
                 }
           );
         }
@@ -632,6 +647,7 @@ function createQueueItem(file) {
     uploadedFile: null,
     existingFile: null,
     duplicateAction: "skip",
+    driveName: file.name,
   };
 }
 
@@ -731,9 +747,33 @@ function createQueueItemElement(item) {
       }
     );
 
+    const keepBothButton =
+      document.createElement("button");
+
+    keepBothButton.type = "button";
+    keepBothButton.className =
+      "queue-action-button";
+    keepBothButton.dataset.action =
+      "keep-both";
+    keepBothButton.textContent = "Keep both";
+    keepBothButton.disabled =
+      state.busy ||
+      item.duplicateAction === "keep-both";
+
+    keepBothButton.addEventListener(
+      "click",
+      () => {
+        setDuplicateAction(
+          item.id,
+          "keep-both"
+        );
+      }
+    );
+
     actions.append(
       skipButton,
-      replaceButton
+      replaceButton,
+      keepBothButton
     );
   }
 
@@ -853,9 +893,15 @@ function getQueueStatusText(item) {
     case "skipped":
       return "Skipped · already exists";
     case "duplicate":
-      return item.duplicateAction === "replace"
-        ? "Already exists · Replace selected"
-        : "Already exists · Skip selected";
+      if (item.duplicateAction === "replace") {
+        return "Already exists · Replace selected";
+      }
+
+      if (item.duplicateAction === "keep-both") {
+        return "Already exists · Keep both selected";
+      }
+
+      return "Already exists · Skip selected";
     default:
       return "Waiting";
   }
@@ -1109,6 +1155,52 @@ function setMessage(
  */
 function clearMessage(element) {
   setMessage(element, "");
+}
+
+/**
+ * Create a Drive filename that does not collide with existing books.
+ *
+ * Examples:
+ * Dune.epub -> Dune (1).epub -> Dune (2).epub
+ *
+ * @param {string} originalName
+ * @param {Map<string, object>} existingByName
+ * @returns {string}
+ */
+function createAvailableBookName(
+  originalName,
+  existingByName
+) {
+  const lastDot = originalName.lastIndexOf(".");
+
+  const hasExtension =
+    lastDot > 0 &&
+    lastDot < originalName.length - 1;
+
+  const stem = hasExtension
+    ? originalName.slice(0, lastDot)
+    : originalName;
+
+  const extension = hasExtension
+    ? originalName.slice(lastDot)
+    : "";
+
+  let index = 1;
+
+  while (true) {
+    const candidate =
+      `${stem} (${index})${extension}`;
+
+    if (
+      !existingByName.has(
+        normalizeBookName(candidate)
+      )
+    ) {
+      return candidate;
+    }
+
+    index += 1;
+  }
 }
 
 /**

@@ -216,15 +216,17 @@ export class GoogleDriveApi {
    * @param {string} accessToken
    * @param {File} file
    * @param {string} booksFolderId
+   * @param {string} [driveName=file.name]
    * @returns {Promise<string>} resumable session URL
    */
   async createBookUploadSession(
     accessToken,
     file,
-    booksFolderId
+    booksFolderId,
+    driveName = file.name
   ) {
     const metadata = {
-      name: file.name,
+      name: driveName,
       parents: [booksFolderId],
       appProperties: {
         [ROLE_KEY]: "book",
