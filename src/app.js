@@ -20,6 +20,8 @@ const elements = {
   driveSourceFolder:
     document.getElementById("drive-source-folder"),
   openDrivePicker: document.getElementById("open-drive-picker"),
+  useAllSourceBooks:
+    document.getElementById("use-all-source-books"),
   driveSelectionEmpty: document.getElementById("drive-selection-empty"),
   driveSelection: document.getElementById("drive-selection"),
   driveSelectionSummary:
@@ -84,6 +86,8 @@ const state = {
   registeringAllFolderBooks: false,
   driveSourceFolder: null,
   driveSourceFolderPicking: false,
+  driveSourceScanning: false,
+  driveSelectionMode: "selected",
   driveSelection: [],
   driveImporting: false,
   driveFolders: [],
@@ -160,6 +164,11 @@ function init() {
   elements.openDrivePicker.addEventListener(
     "click",
     handleOpenDrivePicker
+  );
+
+  elements.useAllSourceBooks.addEventListener(
+    "click",
+    handleUseAllSourceBooks
   );
 
   elements.clearDriveSelection.addEventListener(
@@ -623,7 +632,8 @@ async function handleChooseDriveSourceFolder() {
   if (
     state.busy ||
     state.driveImporting ||
-    state.driveSourceFolderPicking
+    state.driveSourceFolderPicking ||
+    state.driveSourceScanning
   ) {
     return;
   }
@@ -670,6 +680,7 @@ async function handleChooseDriveSourceFolder() {
     state.driveSourceFolder = folder;
 
     if (sourceChanged) {
+      state.driveSelectionMode = "selected";
       state.driveSelection = [];
       renderDriveSelection();
     }
@@ -713,7 +724,8 @@ async function handleOpenDrivePicker() {
   if (
     state.busy ||
     state.driveImporting ||
-    state.driveSourceFolderPicking
+    state.driveSourceFolderPicking ||
+    state.driveSourceScanning
   ) {
     return;
   }
@@ -770,6 +782,8 @@ async function handleOpenDrivePicker() {
       return;
     }
 
+    state.driveSelectionMode = "selected";
+
     state.driveSelection = selectedBooks.map(
       (book) => ({
         ...book,
@@ -807,6 +821,120 @@ async function handleOpenDrivePicker() {
     elements.openDrivePicker.textContent =
       "Select books from source folder";
 
+    updateDriveImportControls();
+  }
+}
+
+/**
+ * Load every supported book directly inside the selected Drive source folder.
+ *
+ * This only prepares the existing import preview. No file is copied until the
+ * user confirms the import, so duplicate actions remain explicit.
+ */
+async function handleUseAllSourceBooks() {
+  if (
+    state.busy ||
+    state.driveImporting ||
+    state.driveSourceFolderPicking ||
+    state.driveSourceScanning
+  ) {
+    return;
+  }
+
+  clearMessage(elements.driveImportMessage);
+
+  const accessToken =
+    googleAuth.getAccessToken();
+
+  const sourceFolder =
+    state.driveSourceFolder;
+
+  if (!accessToken) {
+    setMessage(
+      elements.driveImportMessage,
+      "Connect Google Drive before loading source books.",
+      "error"
+    );
+    return;
+  }
+
+  if (!sourceFolder?.id) {
+    setMessage(
+      elements.driveImportMessage,
+      "Choose a source folder first.",
+      "error"
+    );
+    return;
+  }
+
+  state.driveSourceScanning = true;
+  updateDriveImportControls();
+
+  try {
+    const directFiles =
+      await googleDriveApi.listBooksInFolder(
+        accessToken,
+        sourceFolder.id
+      );
+
+    const books =
+      directFiles.filter((file) =>
+        googleDriveApi.isSupportedBook(file)
+      );
+
+    state.driveSelectionMode = "all";
+
+    state.driveSelection = books.map(
+      (book) => ({
+        ...book,
+        importStatus: "selected",
+        importMessage: "",
+        duplicateAction: "skip",
+        existingFile: null,
+      })
+    );
+
+    if (books.length === 0) {
+      renderDriveSelection();
+
+      setMessage(
+        elements.driveImportMessage,
+        `No EPUB/PDF files were found directly in ${sourceFolder.name}.`,
+        "success"
+      );
+      return;
+    }
+
+    const duplicateCount =
+      await refreshDriveImportDuplicateStates();
+
+    const duplicateText =
+      duplicateCount > 0
+        ? ` ${duplicateCount} duplicate` +
+          `${duplicateCount === 1 ? "" : "s"} found; ` +
+          "review Skip, Replace, or Keep both before importing."
+        : ` Ready to import into ${getDriveDestinationPath()}.`;
+
+    setMessage(
+      elements.driveImportMessage,
+      `${books.length} EPUB/PDF book` +
+        `${books.length === 1 ? "" : "s"} loaded from ` +
+        `${sourceFolder.name}.` +
+        duplicateText,
+      "success"
+    );
+  } catch (error) {
+    state.driveSelectionMode = "selected";
+    state.driveSelection = [];
+    renderDriveSelection();
+
+    setMessage(
+      elements.driveImportMessage,
+      `Could not scan source folder: ${getErrorMessage(error)}`,
+      "error"
+    );
+  } finally {
+    state.driveSourceScanning = false;
     updateDriveImportControls();
   }
 }
@@ -924,10 +1052,15 @@ function setDriveImportDuplicateAction(
  * Clear the current Google Drive import preview.
  */
 function handleClearDriveSelection() {
-  if (state.busy || state.driveImporting) {
+  if (
+    state.busy ||
+    state.driveImporting ||
+    state.driveSourceScanning
+  ) {
     return;
   }
 
+  state.driveSelectionMode = "selected";
   state.driveSelection = [];
   clearMessage(elements.driveImportMessage);
   renderDriveSelection();
@@ -1052,6 +1185,7 @@ function updateDriveImportControls() {
     !state.busy &&
     !state.driveImporting &&
     !state.driveSourceFolderPicking &&
+    !state.driveSourceScanning &&
     googleAuth.isConnected();
 
   const pickerReady =
@@ -1085,6 +1219,14 @@ function updateDriveImportControls() {
 
   elements.openDrivePicker.disabled = !canOpen;
 
+  elements.useAllSourceBooks.disabled =
+    !canOpen;
+
+  elements.useAllSourceBooks.textContent =
+    state.driveSourceScanning
+      ? "Scanning source folder…"
+      : "Use all books from source folder";
+
   elements.clearDriveSelection.disabled =
     !ready ||
     state.driveSelection.length === 0;
@@ -1095,7 +1237,9 @@ function updateDriveImportControls() {
   elements.importDriveBooks.textContent =
     state.driveImporting
       ? "Importing…"
-      : "Import selected books";
+      : state.driveSelectionMode === "all"
+        ? "Import all books"
+        : "Import selected books";
 
   const destinationReady =
     !state.busy &&
@@ -3129,6 +3273,7 @@ function disableBookSelection() {
  */
 function setDisconnectedState() {
   state.driveSourceFolder = null;
+  state.driveSelectionMode = "selected";
   state.driveSelection = [];
   renderDriveSourceFolder();
   renderDriveSelection();
