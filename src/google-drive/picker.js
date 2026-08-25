@@ -79,6 +79,69 @@ export class GoogleDrivePicker {
   }
 
   /**
+   * Open Google Picker for selecting one source folder.
+   *
+   * @param {string} accessToken
+   * @returns {Promise<{
+   *   id: string,
+   *   name: string,
+   *   mimeType: string,
+   *   url: string,
+   *   parentId: string
+   * } | null>}
+   */
+  async pickFolder(accessToken) {
+    if (!accessToken) {
+      throw new Error(
+        "Connect Google Drive before opening the Picker."
+      );
+    }
+
+    const { apiKey, appId } = this.getConfig();
+
+    if (!apiKey || !appId) {
+      throw new Error(
+        "Save Google Picker API key and project number first."
+      );
+    }
+
+    await loadPickerLibrary();
+
+    return new Promise((resolve, reject) => {
+      try {
+        const view =
+          new google.picker.DocsView(
+            google.picker.ViewId.FOLDERS
+          );
+
+        view.setIncludeFolders(true);
+        view.setSelectFolderEnabled(true);
+
+        const picker =
+          new google.picker.PickerBuilder()
+            .setDeveloperKey(apiKey)
+            .setAppId(appId)
+            .setOAuthToken(accessToken)
+            .setOrigin(window.location.origin)
+            .addView(view)
+            .setTitle("Choose source folder")
+            .setCallback((data) => {
+              handleFolderPickerCallback(
+                data,
+                resolve,
+                reject
+              );
+            })
+            .build();
+
+        picker.setVisible(true);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  /**
    * Open Google Picker for EPUB/PDF selection.
    *
    * The view intentionally does not set ownedByMe, so both user-owned and
@@ -283,6 +346,75 @@ async function waitForGapi(
   throw new Error(
     "Google API loader did not initialize."
   );
+}
+
+/**
+ * @param {object} data
+ * @param {(folder: object | null) => void} resolve
+ * @param {(error: Error) => void} reject
+ */
+function handleFolderPickerCallback(
+  data,
+  resolve,
+  reject
+) {
+  console.debug(
+    "KOCloud Google folder Picker callback:",
+    data
+  );
+
+  const rawAction = data?.action ?? "";
+  const action =
+    String(rawAction).toLowerCase();
+
+  const pickedAction =
+    String(
+      google.picker.Action.PICKED
+    ).toLowerCase();
+
+  const cancelAction =
+    String(
+      google.picker.Action.CANCEL
+    ).toLowerCase();
+
+  const errorAction =
+    String(
+      google.picker.Action.ERROR
+    ).toLowerCase();
+
+  if (action === cancelAction) {
+    resolve(null);
+    return;
+  }
+
+  if (action === errorAction) {
+    reject(
+      new Error(
+        "Google Picker reported a folder selection error."
+      )
+    );
+    return;
+  }
+
+  if (action !== pickedAction) {
+    return;
+  }
+
+  try {
+    const documents =
+      Array.isArray(data?.docs)
+        ? data.docs
+        : [];
+
+    const folder =
+      documents.length > 0
+        ? normalizePickerDocument(documents[0])
+        : null;
+
+    resolve(folder);
+  } catch (error) {
+    reject(error);
+  }
 }
 
 /**

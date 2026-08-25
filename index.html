@@ -155,8 +155,26 @@
       <h2 id="drive-import-title">Import from Google Drive</h2>
 
       <p class="help-text">
-        Select EPUB/PDF files from your Drive or files shared with you.
-        Google copies the selected files directly into KOCloud/Books.
+        Choose a source folder first, then select EPUB/PDF books from that
+        folder. Google copies the selected files directly into KOCloud/Books.
+      </p>
+
+      <label>Source folder</label>
+
+      <button
+        id="choose-drive-source-folder"
+        type="button"
+        class="secondary-button full-width"
+        disabled
+      >
+        Choose source folder
+      </button>
+
+      <p
+        id="drive-source-folder"
+        class="help-text"
+      >
+        No source folder selected.
       </p>
 
       <button
@@ -165,7 +183,7 @@
         class="secondary-button full-width"
         disabled
       >
-        Select books from Google Drive
+        Select books from source folder
       </button>
 
       <div id="drive-selection-empty" class="queue-empty">

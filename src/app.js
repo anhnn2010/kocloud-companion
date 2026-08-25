@@ -15,6 +15,10 @@ const elements = {
   connectionStatus: document.getElementById("connection-status"),
   authMessage: document.getElementById("auth-message"),
 
+  chooseDriveSourceFolder:
+    document.getElementById("choose-drive-source-folder"),
+  driveSourceFolder:
+    document.getElementById("drive-source-folder"),
   openDrivePicker: document.getElementById("open-drive-picker"),
   driveSelectionEmpty: document.getElementById("drive-selection-empty"),
   driveSelection: document.getElementById("drive-selection"),
@@ -75,6 +79,8 @@ const state = {
   libraryPath: [],
   libraryLoading: false,
   registeringFolderBooks: false,
+  driveSourceFolder: null,
+  driveSourceFolderPicking: false,
   driveSelection: [],
   driveImporting: false,
   driveFolders: [],
@@ -95,6 +101,7 @@ function init() {
 
   setDisconnectedState();
   renderQueue();
+  renderDriveSourceFolder();
   renderDriveSelection();
 
   elements.saveClientId.addEventListener(
@@ -135,6 +142,11 @@ function init() {
   elements.registerFolderBooks.addEventListener(
     "click",
     handleRegisterFolderBooks
+  );
+
+  elements.chooseDriveSourceFolder.addEventListener(
+    "click",
+    handleChooseDriveSourceFolder
   );
 
   elements.openDrivePicker.addEventListener(
@@ -594,16 +606,115 @@ async function handleCreateBookFolder() {
 }
 
 /**
+ * Choose the Google Drive folder that acts as the import source scope.
+ *
+ * Changing source clears the previous book selection so files from different
+ * source contexts are never mixed in one import preview.
+ */
+async function handleChooseDriveSourceFolder() {
+  if (
+    state.busy ||
+    state.driveImporting ||
+    state.driveSourceFolderPicking
+  ) {
+    return;
+  }
+
+  clearMessage(elements.driveImportMessage);
+
+  const accessToken =
+    googleAuth.getAccessToken();
+
+  if (!accessToken) {
+    setMessage(
+      elements.driveImportMessage,
+      "Connect Google Drive before choosing a source folder.",
+      "error"
+    );
+    return;
+  }
+
+  if (!googleDrivePicker.isConfigured()) {
+    setMessage(
+      elements.driveImportMessage,
+      "Save Google Picker API key and project number first.",
+      "error"
+    );
+    return;
+  }
+
+  state.driveSourceFolderPicking = true;
+  updateDriveImportControls();
+
+  try {
+    const folder =
+      await googleDrivePicker.pickFolder(
+        accessToken
+      );
+
+    if (!folder?.id) {
+      return;
+    }
+
+    const sourceChanged =
+      state.driveSourceFolder?.id !== folder.id;
+
+    state.driveSourceFolder = folder;
+
+    if (sourceChanged) {
+      state.driveSelection = [];
+      renderDriveSelection();
+    }
+
+    renderDriveSourceFolder();
+
+    setMessage(
+      elements.driveImportMessage,
+      `Source folder selected: ${folder.name}.`,
+      "success"
+    );
+  } catch (error) {
+    setMessage(
+      elements.driveImportMessage,
+      getErrorMessage(error),
+      "error"
+    );
+  } finally {
+    state.driveSourceFolderPicking = false;
+    updateDriveImportControls();
+  }
+}
+
+/**
+ * Render the currently selected Drive source folder.
+ */
+function renderDriveSourceFolder() {
+  const folder =
+    state.driveSourceFolder;
+
+  elements.driveSourceFolder.textContent =
+    folder?.name
+      ? `Selected: ${folder.name}`
+      : "No source folder selected.";
+}
+
+/**
  * Open Google Picker and preview selected Drive books.
  */
 async function handleOpenDrivePicker() {
-  if (state.busy) {
+  if (
+    state.busy ||
+    state.driveImporting ||
+    state.driveSourceFolderPicking
+  ) {
     return;
   }
 
   clearMessage(elements.driveImportMessage);
 
   const accessToken = googleAuth.getAccessToken();
+  const sourceFolder =
+    state.driveSourceFolder;
 
   if (!accessToken) {
     setMessage(
@@ -623,6 +734,15 @@ async function handleOpenDrivePicker() {
     return;
   }
 
+  if (!sourceFolder?.id) {
+    setMessage(
+      elements.driveImportMessage,
+      "Choose a source folder before selecting books.",
+      "error"
+    );
+    return;
+  }
+
   elements.openDrivePicker.disabled = true;
   elements.openDrivePicker.textContent =
     "Opening Google Drive…";
@@ -630,7 +750,12 @@ async function handleOpenDrivePicker() {
   try {
     const selectedBooks =
       await googleDrivePicker.pickBooks(
-        accessToken
+        accessToken,
+        {
+          parentId: sourceFolder.id,
+          title:
+            `Select books from ${sourceFolder.name}`,
+        }
       );
 
     if (selectedBooks.length === 0) {
@@ -655,7 +780,7 @@ async function handleOpenDrivePicker() {
         ? ` ${duplicateCount} duplicate` +
           `${duplicateCount === 1 ? "" : "s"} found; ` +
           "choose Skip, Replace, or Keep both."
-        : " Ready to import into KOCloud/Books.";
+        : ` Ready to import into ${getDriveDestinationPath()}.`;
 
     setMessage(
       elements.driveImportMessage,
@@ -672,7 +797,7 @@ async function handleOpenDrivePicker() {
     );
   } finally {
     elements.openDrivePicker.textContent =
-      "Select books from Google Drive";
+      "Select books from source folder";
 
     updateDriveImportControls();
   }
@@ -918,11 +1043,16 @@ function updateDriveImportControls() {
   const ready =
     !state.busy &&
     !state.driveImporting &&
+    !state.driveSourceFolderPicking &&
     googleAuth.isConnected();
 
-  const canOpen =
+  const pickerReady =
     ready &&
     googleDrivePicker.isConfigured();
+
+  const canOpen =
+    pickerReady &&
+    Boolean(state.driveSourceFolder?.id);
 
   const canImport =
     ready &&
@@ -934,6 +1064,16 @@ function updateDriveImportControls() {
         book.importStatus !== "skipped" &&
         book.importStatus !== "blocked"
     );
+
+  elements.chooseDriveSourceFolder.disabled =
+    !pickerReady;
+
+  elements.chooseDriveSourceFolder.textContent =
+    state.driveSourceFolderPicking
+      ? "Opening Google Drive…"
+      : state.driveSourceFolder
+        ? "Change source folder"
+        : "Choose source folder";
 
   elements.openDrivePicker.disabled = !canOpen;
 
@@ -2821,6 +2961,10 @@ function disableBookSelection() {
  * Reset auth-related UI to disconnected state.
  */
 function setDisconnectedState() {
+  state.driveSourceFolder = null;
+  state.driveSelection = [];
+  renderDriveSourceFolder();
+  renderDriveSelection();
   setConnectionStatus(
     "Google Drive: Not connected",
     "disconnected"
