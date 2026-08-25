@@ -155,7 +155,8 @@
       <h2 id="drive-import-title">Import from Google Drive</h2>
 
       <p class="help-text">
-        Choose a source folder, then choose how much of it you want to import.
+        Choose the source and destination first, then choose how you want to
+        import the books.
       </p>
 
       <label>Source folder</label>
@@ -174,31 +175,6 @@
         class="help-text"
       >
         No source folder selected.
-      </p>
-
-      <label>Import</label>
-
-      <button
-        id="open-drive-picker"
-        type="button"
-        class="secondary-button full-width"
-        disabled
-      >
-        Select books
-      </button>
-
-      <button
-        id="preview-whole-folder"
-        type="button"
-        class="secondary-button full-width"
-        disabled
-      >
-        This folder + subfolders
-      </button>
-
-      <p class="help-text">
-        Select individual books, or import the whole source folder recursively
-        while preserving its folder structure.
       </p>
 
       <div class="upload-actions">
@@ -242,6 +218,31 @@
         ></p>
       </div>
 
+
+      <label>Import</label>
+
+      <button
+        id="open-drive-picker"
+        type="button"
+        class="secondary-button full-width"
+        disabled
+      >
+        Select books
+      </button>
+
+      <button
+        id="preview-whole-folder"
+        type="button"
+        class="secondary-button full-width"
+        disabled
+      >
+        This folder + subfolders
+      </button>
+
+      <p class="help-text">
+        Select individual books, or import the whole source folder recursively
+        while preserving its folder structure.
+      </p>
 
       <div
         id="whole-folder-preview"
