@@ -280,18 +280,21 @@ export class GoogleDriveApi {
   }
 
   /**
-   * List KOCloud-managed book files in the Books folder.
+   * List all non-folder files directly inside one library folder.
+   *
+   * Duplicate detection uses this broader view so manually added files are
+   * not ignored before they are registered with KOCloud.
    *
    * @param {string} accessToken
-   * @param {string} booksFolderId
+   * @param {string} folderId
    * @returns {Promise<Array<object>>}
    */
-  async listManagedBooks(
+  async listBooksInFolder(
     accessToken,
-    booksFolderId
+    folderId
   ) {
     const parentId =
-      escapeQueryValue(booksFolderId);
+      escapeQueryValue(folderId);
 
     const query =
       `'${parentId}' in parents ` +
@@ -302,6 +305,129 @@ export class GoogleDriveApi {
       accessToken,
       query
     );
+  }
+
+  /**
+   * List only KOCloud-managed books directly inside one library folder.
+   *
+   * @param {string} accessToken
+   * @param {string} folderId
+   * @returns {Promise<Array<object>>}
+   */
+  async listManagedBooks(
+    accessToken,
+    folderId
+  ) {
+    const parentId =
+      escapeQueryValue(folderId);
+
+    const query =
+      `'${parentId}' in parents ` +
+      "and trashed=false " +
+      `and mimeType!='${FOLDER_MIME_TYPE}' ` +
+      `and appProperties has { key='${ROLE_KEY}' ` +
+      "and value='book' }";
+
+    return this.listFiles(
+      accessToken,
+      query
+    );
+  }
+
+  /**
+   * Read metadata needed to register an existing file in place.
+   *
+   * @param {string} accessToken
+   * @param {string} fileId
+   * @returns {Promise<object>}
+   */
+  async getBookRegistrationSource(
+    accessToken,
+    fileId
+  ) {
+    const safeFileId =
+      encodeURIComponent(fileId);
+
+    const params = new URLSearchParams({
+      supportsAllDrives: "true",
+      fields:
+        "id,name,mimeType,parents,appProperties,size,modifiedTime," +
+        "capabilities(canEdit)",
+    });
+
+    const response = await fetch(
+      `${DRIVE_FILES_URL}/${safeFileId}?${params}`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      await throwDriveError(
+        response,
+        "Read book registration source"
+      );
+    }
+
+    return response.json();
+  }
+
+  /**
+   * Register an existing Drive file as a KOCloud-managed book in place.
+   *
+   * The file content, parent folder, name, and Drive file ID are unchanged.
+   *
+   * @param {string} accessToken
+   * @param {string} fileId
+   * @param {object} existingAppProperties
+   * @returns {Promise<object>}
+   */
+  async registerExistingBook(
+    accessToken,
+    fileId,
+    existingAppProperties = {}
+  ) {
+    const safeFileId =
+      encodeURIComponent(fileId);
+
+    const params = new URLSearchParams({
+      supportsAllDrives: "true",
+      fields:
+        "id,name,mimeType,parents,appProperties,size,modifiedTime",
+    });
+
+    const appProperties = {
+      ...existingAppProperties,
+      [ROLE_KEY]: "book",
+      [SCHEMA_KEY]: SCHEMA_VERSION,
+      kocloud_source: "manual_drive",
+    };
+
+    const response = await fetch(
+      `${DRIVE_FILES_URL}/${safeFileId}?${params}`,
+      {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type":
+            "application/json; charset=UTF-8",
+        },
+        body: JSON.stringify({
+          appProperties,
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      await throwDriveError(
+        response,
+        "Register existing KOCloud book"
+      );
+    }
+
+    return response.json();
   }
 
   /**

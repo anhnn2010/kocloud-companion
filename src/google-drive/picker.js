@@ -89,10 +89,17 @@ export class GoogleDrivePicker {
    *   id: string,
    *   name: string,
    *   mimeType: string,
-   *   url: string
+   *   url: string,
+   *   parentId: string
    * }>>}
    */
-  async pickBooks(accessToken) {
+  async pickBooks(
+    accessToken,
+    {
+      parentId = "",
+      title = "Select EPUB / PDF books",
+    } = {}
+  ) {
     if (!accessToken) {
       throw new Error(
         "Connect Google Drive before opening the Picker."
@@ -123,6 +130,10 @@ export class GoogleDrivePicker {
         view.setIncludeFolders(true);
         view.setSelectFolderEnabled(false);
 
+        if (parentId) {
+          view.setParent(parentId);
+        }
+
         const picker =
           new google.picker.PickerBuilder()
             .setDeveloperKey(apiKey)
@@ -134,9 +145,7 @@ export class GoogleDrivePicker {
                 .MULTISELECT_ENABLED
             )
             .addView(view)
-            .setTitle(
-              "Select EPUB / PDF books"
-            )
+            .setTitle(title)
             .setCallback((data) => {
               handlePickerCallback(
                 data,
@@ -348,7 +357,8 @@ function handlePickerCallback(
  *   id: string,
  *   name: string,
  *   mimeType: string,
- *   url: string
+ *   url: string,
+ *   parentId: string
  * }}
  */
 function normalizePickerDocument(
@@ -363,6 +373,8 @@ function normalizePickerDocument(
       documentData?.mimeType ??
       "",
     url: documentData?.url ?? "",
+    parentId:
+      documentData?.parentId ?? "",
   };
 }
 

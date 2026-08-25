@@ -52,6 +52,8 @@ const elements = {
   batchProgressText: document.getElementById("batch-progress-text"),
 
   refreshLibrary: document.getElementById("refresh-library"),
+  registerFolderBooks:
+    document.getElementById("register-folder-books"),
   libraryNavigation:
     document.getElementById("library-navigation"),
   libraryBack: document.getElementById("library-back"),
@@ -72,6 +74,7 @@ const state = {
   libraryFolders: [],
   libraryPath: [],
   libraryLoading: false,
+  registeringFolderBooks: false,
   driveSelection: [],
   driveImporting: false,
   driveFolders: [],
@@ -127,6 +130,11 @@ function init() {
   elements.libraryBack.addEventListener(
     "click",
     handleLibraryBack
+  );
+
+  elements.registerFolderBooks.addEventListener(
+    "click",
+    handleRegisterFolderBooks
   );
 
   elements.openDrivePicker.addEventListener(
@@ -686,7 +694,7 @@ async function refreshDriveImportDuplicateStates() {
   }
 
   const existingBooks =
-    await googleDriveApi.listManagedBooks(
+    await googleDriveApi.listBooksInFolder(
       accessToken,
       destinationFolderId
     );
@@ -1009,7 +1017,7 @@ async function handleImportDriveBooks() {
     // Re-read the destination immediately before import so duplicate
     // decisions remain correct if KOCloud changed after Picker selection.
     const existingBooks =
-      await googleDriveApi.listManagedBooks(
+      await googleDriveApi.listBooksInFolder(
         accessToken,
         destinationFolderId
       );
@@ -1316,6 +1324,170 @@ function formatDriveBookType(mimeType) {
   }
 
   return "Book";
+}
+
+/**
+ * Register EPUB/PDF files that already exist in the current My Books folder.
+ *
+ * The Picker is deliberately scoped to the current folder. Registration only
+ * adds KOCloud appProperties; it does not copy, move, rename, or replace the
+ * selected Drive file.
+ */
+async function handleRegisterFolderBooks() {
+  if (
+    state.busy ||
+    state.libraryLoading ||
+    state.registeringFolderBooks
+  ) {
+    return;
+  }
+
+  const accessToken = googleAuth.getAccessToken();
+  const currentFolderId =
+    getCurrentLibraryFolderId();
+
+  if (!accessToken || !currentFolderId) {
+    setMessage(
+      elements.libraryMessage,
+      "Connect Google Drive and open a library folder first.",
+      "error"
+    );
+    return;
+  }
+
+  clearMessage(elements.libraryMessage);
+  state.registeringFolderBooks = true;
+  updateLibraryControls();
+
+  try {
+    const selectedBooks =
+      await googleDrivePicker.pickBooks(
+        accessToken,
+        {
+          parentId: currentFolderId,
+          title: "Register books in this folder",
+        }
+      );
+
+    if (selectedBooks.length === 0) {
+      return;
+    }
+
+    let registered = 0;
+    let alreadyRegistered = 0;
+    let readOnly = 0;
+    let outsideFolder = 0;
+    let failed = 0;
+
+    for (const selected of selectedBooks) {
+      try {
+        // Picker normally returns parentId for a scoped DocsView. If it does,
+        // use that direct selection context instead of trying to infer folder
+        // membership through Drive listing under drive.file.
+        if (
+          selected.parentId &&
+          selected.parentId !== currentFolderId
+        ) {
+          outsideFolder += 1;
+          continue;
+        }
+
+        const source =
+          await googleDriveApi.getBookRegistrationSource(
+            accessToken,
+            selected.id
+          );
+
+        const appProperties =
+          source.appProperties || {};
+
+        if (
+          appProperties.kocloud_role === "book"
+        ) {
+          alreadyRegistered += 1;
+          continue;
+        }
+
+        if (
+          source.capabilities &&
+          source.capabilities.canEdit === false
+        ) {
+          readOnly += 1;
+          continue;
+        }
+
+        await googleDriveApi.registerExistingBook(
+          accessToken,
+          source.id,
+          appProperties
+        );
+
+        registered += 1;
+      } catch (error) {
+        console.error(
+          "KOCloud register book failed:",
+          selected,
+          error
+        );
+        failed += 1;
+      }
+    }
+
+    if (registered > 0) {
+      await loadLibrary();
+    }
+
+    const parts = [];
+
+    if (registered > 0) {
+      parts.push(
+        `${registered} registered`
+      );
+    }
+
+    if (alreadyRegistered > 0) {
+      parts.push(
+        `${alreadyRegistered} already registered`
+      );
+    }
+
+    if (readOnly > 0) {
+      parts.push(
+        `${readOnly} read-only`
+      );
+    }
+
+    if (outsideFolder > 0) {
+      parts.push(
+        `${outsideFolder} outside this folder`
+      );
+    }
+
+    if (failed > 0) {
+      parts.push(
+        `${failed} failed`
+      );
+    }
+
+    setMessage(
+      elements.libraryMessage,
+      parts.length > 0
+        ? `${parts.join(", ")}.`
+        : "No books were registered.",
+      failed > 0 || readOnly > 0
+        ? "error"
+        : "success"
+    );
+  } catch (error) {
+    setMessage(
+      elements.libraryMessage,
+      getErrorMessage(error),
+      "error"
+    );
+  } finally {
+    state.registeringFolderBooks = false;
+    updateLibraryControls();
+  }
 }
 
 /**
@@ -1769,6 +1941,16 @@ function updateLibraryControls() {
   elements.libraryBack.disabled =
     !ready ||
     state.libraryPath.length <= 1;
+
+  elements.registerFolderBooks.disabled =
+    !ready ||
+    state.registeringFolderBooks ||
+    !googleDrivePicker.isConfigured();
+
+  elements.registerFolderBooks.textContent =
+    state.registeringFolderBooks
+      ? "Registering…"
+      : "Register books in this folder";
 }
 
 /**
@@ -1840,7 +2022,7 @@ async function refreshDuplicateStates() {
   }
 
   const existingBooks =
-    await googleDriveApi.listManagedBooks(
+    await googleDriveApi.listBooksInFolder(
       accessToken,
       booksFolderId
     );
@@ -2001,7 +2183,7 @@ async function handleUploadAll() {
     // Re-read Drive immediately before the batch to avoid stale duplicate
     // decisions if the cloud changed after file selection.
     const existingBooks =
-      await googleDriveApi.listManagedBooks(
+      await googleDriveApi.listBooksInFolder(
         accessToken,
         booksFolderId
       );
