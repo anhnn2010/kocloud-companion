@@ -58,6 +58,8 @@ const elements = {
   refreshLibrary: document.getElementById("refresh-library"),
   registerFolderBooks:
     document.getElementById("register-folder-books"),
+  registerAllFolderBooks:
+    document.getElementById("register-all-folder-books"),
   libraryNavigation:
     document.getElementById("library-navigation"),
   libraryBack: document.getElementById("library-back"),
@@ -79,6 +81,7 @@ const state = {
   libraryPath: [],
   libraryLoading: false,
   registeringFolderBooks: false,
+  registeringAllFolderBooks: false,
   driveSourceFolder: null,
   driveSourceFolderPicking: false,
   driveSelection: [],
@@ -142,6 +145,11 @@ function init() {
   elements.registerFolderBooks.addEventListener(
     "click",
     handleRegisterFolderBooks
+  );
+
+  elements.registerAllFolderBooks.addEventListener(
+    "click",
+    handleRegisterAllFolderBooks
   );
 
   elements.chooseDriveSourceFolder.addEventListener(
@@ -1477,7 +1485,8 @@ async function handleRegisterFolderBooks() {
   if (
     state.busy ||
     state.libraryLoading ||
-    state.registeringFolderBooks
+    state.registeringFolderBooks ||
+    state.registeringAllFolderBooks
   ) {
     return;
   }
@@ -1505,7 +1514,7 @@ async function handleRegisterFolderBooks() {
         accessToken,
         {
           parentId: currentFolderId,
-          title: "Register books in this folder",
+          title: "Register selected books",
         }
       );
 
@@ -1626,6 +1635,153 @@ async function handleRegisterFolderBooks() {
     );
   } finally {
     state.registeringFolderBooks = false;
+    updateLibraryControls();
+  }
+}
+
+/**
+ * Register all EPUB/PDF files directly inside the current My Books folder.
+ *
+ * This operation is non-recursive and only adds KOCloud appProperties in
+ * place. It never copies, moves, renames, replaces, or deletes files.
+ */
+async function handleRegisterAllFolderBooks() {
+  if (
+    state.busy ||
+    state.libraryLoading ||
+    state.registeringFolderBooks ||
+    state.registeringAllFolderBooks
+  ) {
+    return;
+  }
+
+  const accessToken = googleAuth.getAccessToken();
+  const currentFolderId =
+    getCurrentLibraryFolderId();
+
+  if (!accessToken || !currentFolderId) {
+    setMessage(
+      elements.libraryMessage,
+      "Connect Google Drive and open a library folder first.",
+      "error"
+    );
+    return;
+  }
+
+  clearMessage(elements.libraryMessage);
+  state.registeringAllFolderBooks = true;
+  updateLibraryControls();
+
+  try {
+    const directFiles =
+      await googleDriveApi.listBooksInFolder(
+        accessToken,
+        currentFolderId
+      );
+
+    const books =
+      directFiles.filter((file) =>
+        googleDriveApi.isSupportedBook(file)
+      );
+
+    if (books.length === 0) {
+      setMessage(
+        elements.libraryMessage,
+        "No EPUB/PDF files were found directly in this folder.",
+        "success"
+      );
+      return;
+    }
+
+    let registered = 0;
+    let alreadyRegistered = 0;
+    let readOnly = 0;
+    let failed = 0;
+
+    for (const book of books) {
+      try {
+        const source =
+          await googleDriveApi.getBookRegistrationSource(
+            accessToken,
+            book.id
+          );
+
+        const appProperties =
+          source.appProperties || {};
+
+        if (
+          appProperties.kocloud_role === "book"
+        ) {
+          alreadyRegistered += 1;
+          continue;
+        }
+
+        if (
+          source.capabilities &&
+          source.capabilities.canEdit === false
+        ) {
+          readOnly += 1;
+          continue;
+        }
+
+        await googleDriveApi.registerExistingBook(
+          accessToken,
+          source.id,
+          appProperties
+        );
+
+        registered += 1;
+      } catch (error) {
+        console.error(
+          "KOCloud bulk register failed:",
+          book,
+          error
+        );
+        failed += 1;
+      }
+    }
+
+    if (registered > 0) {
+      await loadLibrary();
+    }
+
+    const parts = [];
+
+    if (registered > 0) {
+      parts.push(`${registered} registered`);
+    }
+
+    if (alreadyRegistered > 0) {
+      parts.push(
+        `${alreadyRegistered} already registered`
+      );
+    }
+
+    if (readOnly > 0) {
+      parts.push(`${readOnly} read-only`);
+    }
+
+    if (failed > 0) {
+      parts.push(`${failed} failed`);
+    }
+
+    setMessage(
+      elements.libraryMessage,
+      parts.length > 0
+        ? `${parts.join(", ")}.`
+        : "No books needed registration.",
+      readOnly > 0 || failed > 0
+        ? "error"
+        : "success"
+    );
+  } catch (error) {
+    setMessage(
+      elements.libraryMessage,
+      `Could not scan this folder: ${getErrorMessage(error)}`,
+      "error"
+    );
+  } finally {
+    state.registeringAllFolderBooks = false;
     updateLibraryControls();
   }
 }
@@ -2085,12 +2241,23 @@ function updateLibraryControls() {
   elements.registerFolderBooks.disabled =
     !ready ||
     state.registeringFolderBooks ||
+    state.registeringAllFolderBooks ||
     !googleDrivePicker.isConfigured();
 
   elements.registerFolderBooks.textContent =
     state.registeringFolderBooks
-      ? "Registering…"
-      : "Register books in this folder";
+      ? "Registering selected…"
+      : "Register selected books";
+
+  elements.registerAllFolderBooks.disabled =
+    !ready ||
+    state.registeringFolderBooks ||
+    state.registeringAllFolderBooks;
+
+  elements.registerAllFolderBooks.textContent =
+    state.registeringAllFolderBooks
+      ? "Registering all…"
+      : "Register all books in this folder";
 }
 
 /**

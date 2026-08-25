@@ -1,8 +1,12 @@
-const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive";
 const CLIENT_ID_STORAGE_KEY = "kocloud_google_web_client_id";
 
 /**
  * Google OAuth helper for KOCloud Companion.
+ *
+ * Companion intentionally requests full Google Drive access because it is the
+ * KOCloud library-management plane. The KOReader plugin continues to use the
+ * narrower drive.file scope with its limited-input OAuth client.
  *
  * The Web OAuth Client ID is persisted in localStorage because it is not a
  * secret. Access tokens are deliberately kept only in page memory.
