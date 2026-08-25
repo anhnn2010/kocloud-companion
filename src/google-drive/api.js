@@ -7,6 +7,9 @@ const DRIVE_UPLOAD_URL =
 const FOLDER_MIME_TYPE =
   "application/vnd.google-apps.folder";
 
+const SHORTCUT_MIME_TYPE =
+  "application/vnd.google-apps.shortcut";
+
 const ROLE_KEY = "kocloud_role";
 const SCHEMA_KEY = "kocloud_schema";
 const SCHEMA_VERSION = "1";
@@ -74,7 +77,8 @@ export class GoogleDriveApi {
         fields:
           "nextPageToken," +
           "files(" +
-          "id,name,mimeType,parents,appProperties,size,modifiedTime" +
+          "id,name,mimeType,parents,appProperties,size,modifiedTime," +
+          "shortcutDetails(targetId,targetMimeType)" +
           ")",
       });
 
@@ -200,12 +204,48 @@ export class GoogleDriveApi {
     const query =
       `'${parentId}' in parents ` +
       "and trashed=false " +
-      `and mimeType='${FOLDER_MIME_TYPE}'`;
+      "and (" +
+      `mimeType='${FOLDER_MIME_TYPE}' ` +
+      "or " +
+      `mimeType='${SHORTCUT_MIME_TYPE}'` +
+      ")";
 
-    const folders = await this.listFiles(
+    const items = await this.listFiles(
       accessToken,
       query
     );
+
+    const folders = [];
+
+    for (const item of items) {
+      if (
+        item.mimeType ===
+        FOLDER_MIME_TYPE
+      ) {
+        folders.push({
+          ...item,
+          isShortcut: false,
+        });
+        continue;
+      }
+
+      if (
+        item.mimeType ===
+          SHORTCUT_MIME_TYPE &&
+        item.shortcutDetails
+          ?.targetMimeType ===
+          FOLDER_MIME_TYPE &&
+        item.shortcutDetails?.targetId
+      ) {
+        folders.push({
+          ...item,
+          sourceShortcutId: item.id,
+          id: item.shortcutDetails.targetId,
+          mimeType: FOLDER_MIME_TYPE,
+          isShortcut: true,
+        });
+      }
+    }
 
     return folders.sort((left, right) =>
       left.name.localeCompare(

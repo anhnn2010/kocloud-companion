@@ -20,8 +20,20 @@ const elements = {
   driveSourceFolder:
     document.getElementById("drive-source-folder"),
   openDrivePicker: document.getElementById("open-drive-picker"),
-  useAllSourceBooks:
-    document.getElementById("use-all-source-books"),
+  previewWholeFolder:
+    document.getElementById("preview-whole-folder"),
+  wholeFolderPreview:
+    document.getElementById("whole-folder-preview"),
+  wholeFolderSummary:
+    document.getElementById("whole-folder-summary"),
+  wholeFolderTarget:
+    document.getElementById("whole-folder-target"),
+  wholeFolderDuplicatePolicy:
+    document.getElementById("whole-folder-duplicate-policy"),
+  importWholeFolder:
+    document.getElementById("import-whole-folder"),
+  clearWholeFolderPreview:
+    document.getElementById("clear-whole-folder-preview"),
   driveSelectionEmpty: document.getElementById("drive-selection-empty"),
   driveSelection: document.getElementById("drive-selection"),
   driveSelectionSummary:
@@ -86,8 +98,10 @@ const state = {
   registeringAllFolderBooks: false,
   driveSourceFolder: null,
   driveSourceFolderPicking: false,
-  driveSourceScanning: false,
-  driveSelectionMode: "selected",
+  wholeFolderScanning: false,
+  wholeFolderImporting: false,
+  wholeFolderPlan: null,
+  wholeFolderDuplicatePolicy: "skip",
   driveSelection: [],
   driveImporting: false,
   driveFolders: [],
@@ -109,6 +123,7 @@ function init() {
   setDisconnectedState();
   renderQueue();
   renderDriveSourceFolder();
+  renderWholeFolderPreview();
   renderDriveSelection();
 
   elements.saveClientId.addEventListener(
@@ -166,9 +181,24 @@ function init() {
     handleOpenDrivePicker
   );
 
-  elements.useAllSourceBooks.addEventListener(
+  elements.previewWholeFolder.addEventListener(
     "click",
-    handleUseAllSourceBooks
+    handlePreviewWholeFolder
+  );
+
+  elements.importWholeFolder.addEventListener(
+    "click",
+    handleImportWholeFolder
+  );
+
+  elements.clearWholeFolderPreview.addEventListener(
+    "click",
+    clearWholeFolderPlan
+  );
+
+  elements.wholeFolderDuplicatePolicy.addEventListener(
+    "change",
+    handleWholeFolderDuplicatePolicyChange
   );
 
   elements.clearDriveSelection.addEventListener(
@@ -457,6 +487,8 @@ async function handleDriveDestinationChange() {
   if (
     state.busy ||
     state.driveImporting ||
+    state.wholeFolderScanning ||
+    state.wholeFolderImporting ||
     state.driveFoldersLoading
   ) {
     return;
@@ -478,6 +510,10 @@ async function handleDriveDestinationChange() {
     folder?.name || "Books";
 
   clearMessage(elements.destinationMessage);
+
+  if (state.wholeFolderPlan) {
+    await refreshWholeFolderPlanForDestination();
+  }
 
   if (state.driveSelection.length > 0) {
     try {
@@ -501,6 +537,8 @@ async function handleCreateBookFolder() {
   if (
     state.busy ||
     state.driveImporting ||
+    state.wholeFolderScanning ||
+    state.wholeFolderImporting ||
     state.driveFoldersLoading
   ) {
     return;
@@ -548,6 +586,10 @@ async function handleCreateBookFolder() {
 
     renderDriveImportDestinations();
 
+    if (state.wholeFolderPlan) {
+      await refreshWholeFolderPlanForDestination();
+    }
+
     setMessage(
       elements.destinationMessage,
       `Folder already exists. Selected ${getDriveDestinationPath()}.`,
@@ -591,6 +633,10 @@ async function handleCreateBookFolder() {
     state.driveDestinationName =
       createdFolder.name;
 
+    if (state.wholeFolderPlan) {
+      await refreshWholeFolderPlanForDestination();
+    }
+
     elements.newBookFolderName.value = "";
     renderDriveImportDestinations();
 
@@ -633,7 +679,8 @@ async function handleChooseDriveSourceFolder() {
     state.busy ||
     state.driveImporting ||
     state.driveSourceFolderPicking ||
-    state.driveSourceScanning
+    state.wholeFolderScanning ||
+    state.wholeFolderImporting
   ) {
     return;
   }
@@ -680,8 +727,8 @@ async function handleChooseDriveSourceFolder() {
     state.driveSourceFolder = folder;
 
     if (sourceChanged) {
-      state.driveSelectionMode = "selected";
       state.driveSelection = [];
+      clearWholeFolderPlan();
       renderDriveSelection();
     }
 
@@ -724,8 +771,7 @@ async function handleOpenDrivePicker() {
   if (
     state.busy ||
     state.driveImporting ||
-    state.driveSourceFolderPicking ||
-    state.driveSourceScanning
+    state.driveSourceFolderPicking
   ) {
     return;
   }
@@ -782,7 +828,8 @@ async function handleOpenDrivePicker() {
       return;
     }
 
-    state.driveSelectionMode = "selected";
+    clearWholeFolderPlan();
+
 
     state.driveSelection = selectedBooks.map(
       (book) => ({
@@ -819,29 +866,320 @@ async function handleOpenDrivePicker() {
     );
   } finally {
     elements.openDrivePicker.textContent =
-      "Select books from source folder";
+      "Select books";
 
     updateDriveImportControls();
   }
 }
 
 /**
- * Load every supported book directly inside the selected Drive source folder.
+ * Scan one Drive source folder recursively.
  *
- * This only prepares the existing import preview. No file is copied until the
- * user confirms the import, so duplicate actions remain explicit.
+ * The preview keeps the complete source folder tree. Branches with no
+ * supported EPUB/PDF books are marked in the preview and skipped during import.
+ *
+ * @param {string} accessToken
+ * @param {{id: string, name: string}} folder
+ * @returns {Promise<object>}
  */
-async function handleUseAllSourceBooks() {
+async function scanWholeFolderTree(
+  accessToken,
+  folder,
+  ancestorIds = new Set()
+) {
+  const currentId = folder.id;
+
+  if (ancestorIds.has(currentId)) {
+    return {
+      id: currentId,
+      name: folder.name,
+      files: [],
+      children: [],
+      folderCount: 1,
+      bookCount: 0,
+      isShortcut:
+        Boolean(folder.isShortcut),
+      cycle: true,
+    };
+  }
+
+  const nextAncestorIds =
+    new Set(ancestorIds);
+
+  nextAncestorIds.add(currentId);
+
+  const [directFiles, childFolders] =
+    await Promise.all([
+      googleDriveApi.listBooksInFolder(
+        accessToken,
+        currentId
+      ),
+      googleDriveApi.listChildFolders(
+        accessToken,
+        currentId
+      ),
+    ]);
+
+  const files =
+    directFiles.filter((file) =>
+      googleDriveApi.isSupportedBook(file)
+    );
+
+  const children = [];
+
+  for (const childFolder of childFolders) {
+    const childTree =
+      await scanWholeFolderTree(
+        accessToken,
+        childFolder,
+        nextAncestorIds
+      );
+
+    children.push(childTree);
+  }
+
+  const folderCount =
+    1 +
+    children.reduce(
+      (total, child) =>
+        total + child.folderCount,
+      0
+    );
+
+  const bookCount =
+    files.length +
+    children.reduce(
+      (total, child) =>
+        total + child.bookCount,
+      0
+    );
+
+  return {
+    id: currentId,
+    name: folder.name,
+    files,
+    children,
+    folderCount,
+    bookCount,
+    isShortcut:
+      Boolean(folder.isShortcut),
+    cycle: false,
+  };
+}
+
+/**
+ * Find a direct child folder by normalized name.
+ *
+ * @param {Array<object>} folders
+ * @param {string} name
+ * @returns {object|null}
+ */
+function findFolderByName(
+  folders,
+  name
+) {
+  const key = normalizeBookName(name);
+
+  return (
+    folders.find(
+      (folder) =>
+        normalizeBookName(folder.name) ===
+        key
+    ) || null
+  );
+}
+
+/**
+ * Mark file-name conflicts for a source tree against the current destination.
+ *
+ * Each source file receives previewDuplicate=true/false so the recursive
+ * preview can show exactly where conflicts occur.
+ *
+ * Destination folders are only inspected when a matching folder already
+ * exists. Missing branches can only contain source-internal duplicates.
+ *
+ * @param {string} accessToken
+ * @param {object} node
+ * @param {string} destinationParentId
+ * @returns {Promise<number>}
+ */
+async function countWholeFolderDuplicates(
+  accessToken,
+  node,
+  destinationParentId
+) {
+  clearWholeFolderDuplicateMarks(node);
+
+  const destinationChildren =
+    await googleDriveApi.listChildFolders(
+      accessToken,
+      destinationParentId
+    );
+
+  const destinationFolder =
+    findFolderByName(
+      destinationChildren,
+      node.name
+    );
+
+  if (!destinationFolder) {
+    return markSourceTreeInternalDuplicates(
+      node
+    );
+  }
+
+  return markWholeFolderDuplicatesAgainstDestination(
+    accessToken,
+    node,
+    destinationFolder.id
+  );
+}
+
+/**
+ * Clear duplicate preview state recursively.
+ *
+ * @param {object} node
+ */
+function clearWholeFolderDuplicateMarks(
+  node
+) {
+  for (const file of node.files) {
+    file.previewDuplicate = false;
+  }
+
+  for (const child of node.children) {
+    clearWholeFolderDuplicateMarks(
+      child
+    );
+  }
+}
+
+/**
+ * Mark duplicate names inside a source subtree when the corresponding
+ * destination branch does not exist yet.
+ *
+ * @param {object} node
+ * @returns {number}
+ */
+function markSourceTreeInternalDuplicates(
+  node
+) {
+  let duplicateCount = 0;
+  const names = new Set();
+
+  for (const file of node.files) {
+    const key = normalizeBookName(file.name);
+
+    if (names.has(key)) {
+      file.previewDuplicate = true;
+      duplicateCount += 1;
+    } else {
+      names.add(key);
+    }
+  }
+
+  for (const child of node.children) {
+    duplicateCount +=
+      markSourceTreeInternalDuplicates(
+        child
+      );
+  }
+
+  return duplicateCount;
+}
+
+/**
+ * Mark duplicates for one source node whose matching destination folder
+ * already exists.
+ *
+ * @param {string} accessToken
+ * @param {object} node
+ * @param {string} destinationFolderId
+ * @returns {Promise<number>}
+ */
+async function markWholeFolderDuplicatesAgainstDestination(
+  accessToken,
+  node,
+  destinationFolderId
+) {
+  let duplicateCount = 0;
+
+  const destinationFiles =
+    await googleDriveApi.listBooksInFolder(
+      accessToken,
+      destinationFolderId
+    );
+
+  const destinationNames =
+    new Set(
+      destinationFiles.map((file) =>
+        normalizeBookName(file.name)
+      )
+    );
+
+  const sourceNames = new Set();
+
+  for (const file of node.files) {
+    const key = normalizeBookName(file.name);
+
+    const isDuplicate =
+      destinationNames.has(key) ||
+      sourceNames.has(key);
+
+    file.previewDuplicate =
+      isDuplicate;
+
+    if (isDuplicate) {
+      duplicateCount += 1;
+    }
+
+    sourceNames.add(key);
+  }
+
+  const destinationChildren =
+    await googleDriveApi.listChildFolders(
+      accessToken,
+      destinationFolderId
+    );
+
+  for (const child of node.children) {
+    const destinationChild =
+      findFolderByName(
+        destinationChildren,
+        child.name
+      );
+
+    if (destinationChild) {
+      duplicateCount +=
+        await markWholeFolderDuplicatesAgainstDestination(
+          accessToken,
+          child,
+          destinationChild.id
+        );
+    } else {
+      duplicateCount +=
+        markSourceTreeInternalDuplicates(
+          child
+        );
+    }
+  }
+
+  return duplicateCount;
+}
+
+/**
+ * Build a read-only recursive import preview.
+ */
+async function handlePreviewWholeFolder() {
   if (
     state.busy ||
     state.driveImporting ||
     state.driveSourceFolderPicking ||
-    state.driveSourceScanning
+    state.wholeFolderScanning ||
+    state.wholeFolderImporting
   ) {
     return;
   }
-
-  clearMessage(elements.driveImportMessage);
 
   const accessToken =
     googleAuth.getAccessToken();
@@ -849,92 +1187,561 @@ async function handleUseAllSourceBooks() {
   const sourceFolder =
     state.driveSourceFolder;
 
-  if (!accessToken) {
+  const destinationFolderId =
+    getDriveDestinationFolderId();
+
+  if (
+    !accessToken ||
+    !sourceFolder?.id ||
+    !destinationFolderId
+  ) {
     setMessage(
       elements.driveImportMessage,
-      "Connect Google Drive before loading source books.",
+      "Choose a source folder and destination first.",
       "error"
     );
     return;
   }
 
-  if (!sourceFolder?.id) {
-    setMessage(
-      elements.driveImportMessage,
-      "Choose a source folder first.",
-      "error"
-    );
-    return;
-  }
+  clearMessage(elements.driveImportMessage);
 
-  state.driveSourceScanning = true;
+  state.driveSelection = [];
+  renderDriveSelection();
+
+  state.wholeFolderScanning = true;
+  state.wholeFolderPlan = null;
+  renderWholeFolderPreview();
   updateDriveImportControls();
 
   try {
-    const directFiles =
-      await googleDriveApi.listBooksInFolder(
+    const tree =
+      await scanWholeFolderTree(
         accessToken,
-        sourceFolder.id
+        sourceFolder
       );
 
-    const books =
-      directFiles.filter((file) =>
-        googleDriveApi.isSupportedBook(file)
-      );
-
-    state.driveSelectionMode = "all";
-
-    state.driveSelection = books.map(
-      (book) => ({
-        ...book,
-        importStatus: "selected",
-        importMessage: "",
-        duplicateAction: "skip",
-        existingFile: null,
-      })
-    );
-
-    if (books.length === 0) {
-      renderDriveSelection();
-
+    if (tree.bookCount === 0) {
       setMessage(
         elements.driveImportMessage,
-        `No EPUB/PDF files were found directly in ${sourceFolder.name}.`,
+        `No EPUB/PDF books were found in ${sourceFolder.name} or its subfolders.`,
         "success"
       );
       return;
     }
 
     const duplicateCount =
-      await refreshDriveImportDuplicateStates();
+      await countWholeFolderDuplicates(
+        accessToken,
+        tree,
+        destinationFolderId
+      );
 
-    const duplicateText =
-      duplicateCount > 0
-        ? ` ${duplicateCount} duplicate` +
-          `${duplicateCount === 1 ? "" : "s"} found; ` +
-          "review Skip, Replace, or Keep both before importing."
-        : ` Ready to import into ${getDriveDestinationPath()}.`;
+    state.wholeFolderPlan = {
+      tree,
+      sourceFolderId:
+        sourceFolder.id,
+      destinationFolderId,
+      destinationPath:
+        getDriveDestinationPath(),
+      duplicateCount,
+    };
+
+    renderWholeFolderPreview();
 
     setMessage(
       elements.driveImportMessage,
-      `${books.length} EPUB/PDF book` +
-        `${books.length === 1 ? "" : "s"} loaded from ` +
-        `${sourceFolder.name}.` +
-        duplicateText,
+      `Whole-folder preview ready: ${tree.bookCount} book` +
+        `${tree.bookCount === 1 ? "" : "s"}, ` +
+        `${tree.folderCount} folder` +
+        `${tree.folderCount === 1 ? "" : "s"}, ` +
+        `${duplicateCount} duplicate` +
+        `${duplicateCount === 1 ? "" : "s"}.`,
       "success"
     );
   } catch (error) {
-    state.driveSelectionMode = "selected";
-    state.driveSelection = [];
-    renderDriveSelection();
+    state.wholeFolderPlan = null;
+    renderWholeFolderPreview();
 
     setMessage(
       elements.driveImportMessage,
-      `Could not scan source folder: ${getErrorMessage(error)}`,
+      `Could not scan whole source folder: ${getErrorMessage(error)}`,
       "error"
     );
   } finally {
-    state.driveSourceScanning = false;
+    state.wholeFolderScanning = false;
+    renderWholeFolderPreview();
+    updateDriveImportControls();
+  }
+}
+
+/**
+ * Refresh the recursive preview after the destination changes.
+ *
+ * The source tree is reused; only destination duplicate analysis is repeated.
+ * This avoids forcing the user to scan the source folder again.
+ */
+async function refreshWholeFolderPlanForDestination() {
+  const plan =
+    state.wholeFolderPlan;
+
+  if (
+    !plan ||
+    state.wholeFolderScanning ||
+    state.wholeFolderImporting
+  ) {
+    return;
+  }
+
+  const accessToken =
+    googleAuth.getAccessToken();
+
+  const destinationFolderId =
+    getDriveDestinationFolderId();
+
+  if (!accessToken || !destinationFolderId) {
+    return;
+  }
+
+  state.wholeFolderScanning = true;
+  updateDriveImportControls();
+  renderWholeFolderPreview();
+
+  try {
+    const duplicateCount =
+      await countWholeFolderDuplicates(
+        accessToken,
+        plan.tree,
+        destinationFolderId
+      );
+
+    state.wholeFolderPlan = {
+      ...plan,
+      destinationFolderId,
+      destinationPath:
+        getDriveDestinationPath(),
+      duplicateCount,
+    };
+
+    renderWholeFolderPreview();
+
+    setMessage(
+      elements.driveImportMessage,
+      `Destination updated: ${plan.tree.bookCount} book` +
+        `${plan.tree.bookCount === 1 ? "" : "s"}, ` +
+        `${plan.tree.folderCount} folder` +
+        `${plan.tree.folderCount === 1 ? "" : "s"}, ` +
+        `${duplicateCount} duplicate` +
+        `${duplicateCount === 1 ? "" : "s"}.`,
+      "success"
+    );
+  } catch (error) {
+    setMessage(
+      elements.driveImportMessage,
+      `Could not refresh destination preview: ${getErrorMessage(error)}`,
+      "error"
+    );
+  } finally {
+    state.wholeFolderScanning = false;
+    renderWholeFolderPreview();
+    updateDriveImportControls();
+  }
+}
+
+/**
+ * Clear the recursive import preview.
+ */
+function clearWholeFolderPlan() {
+  if (state.wholeFolderImporting) {
+    return;
+  }
+
+  state.wholeFolderPlan = null;
+  renderWholeFolderPreview();
+  updateDriveImportControls();
+}
+
+/**
+ * Store the global duplicate policy for recursive import.
+ */
+function handleWholeFolderDuplicatePolicyChange() {
+  const policy =
+    elements.wholeFolderDuplicatePolicy.value;
+
+  if (
+    policy !== "skip" &&
+    policy !== "replace" &&
+    policy !== "keep-both"
+  ) {
+    return;
+  }
+
+  state.wholeFolderDuplicatePolicy =
+    policy;
+}
+
+/**
+ * Render recursive whole-folder preview state.
+ */
+function renderWholeFolderPreview() {
+  const plan =
+    state.wholeFolderPlan;
+
+  elements.wholeFolderPreview.hidden =
+    !plan &&
+    !state.wholeFolderScanning;
+
+  if (state.wholeFolderScanning) {
+    elements.wholeFolderSummary.textContent =
+      "Scanning whole folder…";
+
+    elements.wholeFolderTarget.textContent =
+      "Reading source folders and checking destination duplicates.";
+
+    return;
+  }
+
+  if (!plan) {
+    elements.wholeFolderSummary.textContent =
+      "Folder + subfolders";
+    elements.wholeFolderTarget.textContent = "";
+    return;
+  }
+
+  const tree = plan.tree;
+
+  elements.wholeFolderSummary.textContent =
+    `${tree.bookCount} book` +
+    `${tree.bookCount === 1 ? "" : "s"} · ` +
+    `${tree.folderCount} folder` +
+    `${tree.folderCount === 1 ? "" : "s"} · ` +
+    `${plan.duplicateCount} duplicate` +
+    `${plan.duplicateCount === 1 ? "" : "s"}`;
+
+  elements.wholeFolderTarget.textContent =
+    `Destination: ${plan.destinationPath}/${tree.name}`;
+
+  elements.wholeFolderDuplicatePolicy.value =
+    state.wholeFolderDuplicatePolicy;
+}
+
+/**
+ * Return an existing matching child folder or create it.
+ *
+ * @param {string} accessToken
+ * @param {string} parentFolderId
+ * @param {string} name
+ * @returns {Promise<object>}
+ */
+async function ensureWholeImportFolder(
+  accessToken,
+  parentFolderId,
+  name
+) {
+  const children =
+    await googleDriveApi.listChildFolders(
+      accessToken,
+      parentFolderId
+    );
+
+  const existing =
+    findFolderByName(
+      children,
+      name
+    );
+
+  if (existing) {
+    return existing;
+  }
+
+  return googleDriveApi.createBookFolder(
+    accessToken,
+    parentFolderId,
+    name
+  );
+}
+
+/**
+ * Import one recursive source-tree node into one destination parent.
+ *
+ * @param {string} accessToken
+ * @param {object} node
+ * @param {string} destinationParentId
+ * @param {"skip"|"replace"|"keep-both"} duplicatePolicy
+ * @param {object} counts
+ * @returns {Promise<void>}
+ */
+async function importWholeFolderNode(
+  accessToken,
+  node,
+  destinationParentId,
+  duplicatePolicy,
+  counts
+) {
+  if (
+    node.bookCount === 0 ||
+    node.cycle
+  ) {
+    return;
+  }
+
+  const destinationFolder =
+    await ensureWholeImportFolder(
+      accessToken,
+      destinationParentId,
+      node.name
+    );
+
+  const destinationFiles =
+    await googleDriveApi.listBooksInFolder(
+      accessToken,
+      destinationFolder.id
+    );
+
+  const existingByName = new Map();
+
+  for (const file of destinationFiles) {
+    const key =
+      normalizeBookName(file.name);
+
+    if (!existingByName.has(key)) {
+      existingByName.set(key, file);
+    }
+  }
+
+  for (const file of node.files) {
+    try {
+      const source =
+        await googleDriveApi.getImportSource(
+          accessToken,
+          file.id
+        );
+
+      if (!source.capabilities?.canCopy) {
+        counts.blocked += 1;
+        continue;
+      }
+
+      const sourceName =
+        source.name || file.name;
+
+      const key =
+        normalizeBookName(sourceName);
+
+      const existing =
+        existingByName.get(key) ||
+        null;
+
+      if (
+        existing &&
+        duplicatePolicy === "skip"
+      ) {
+        counts.skipped += 1;
+        continue;
+      }
+
+      const isReplace =
+        Boolean(existing) &&
+        duplicatePolicy === "replace";
+
+      const isKeepBoth =
+        Boolean(existing) &&
+        duplicatePolicy === "keep-both";
+
+      let driveName = sourceName;
+
+      if (isKeepBoth) {
+        driveName =
+          createAvailableBookName(
+            sourceName,
+            existingByName
+          );
+      }
+
+      const copied =
+        await googleDriveApi.copyBookToFolder(
+          accessToken,
+          file.id,
+          destinationFolder.id,
+          driveName
+        );
+
+      if (isReplace) {
+        try {
+          await googleDriveApi.trashFile(
+            accessToken,
+            existing.id
+          );
+        } catch (replaceError) {
+          try {
+            await googleDriveApi.trashFile(
+              accessToken,
+              copied.id
+            );
+          } catch {
+            // Keep the original replacement error below.
+          }
+
+          throw new Error(
+            "Replacement copy was created, but the old book " +
+              "could not be moved to Trash: " +
+              getErrorMessage(replaceError)
+          );
+        }
+
+        counts.replaced += 1;
+        existingByName.set(
+          key,
+          copied
+        );
+      } else {
+        counts.imported += 1;
+        existingByName.set(
+          normalizeBookName(driveName),
+          copied
+        );
+      }
+    } catch (error) {
+      console.error(
+        "KOCloud recursive import failed:",
+        file,
+        error
+      );
+      counts.failed += 1;
+    }
+  }
+
+  for (const child of node.children) {
+    await importWholeFolderNode(
+      accessToken,
+      child,
+      destinationFolder.id,
+      duplicatePolicy,
+      counts
+    );
+  }
+}
+
+/**
+ * Apply the current recursive whole-folder import preview.
+ */
+async function handleImportWholeFolder() {
+  if (
+    state.busy ||
+    state.driveImporting ||
+    state.wholeFolderScanning ||
+    state.wholeFolderImporting
+  ) {
+    return;
+  }
+
+  const plan =
+    state.wholeFolderPlan;
+
+  const accessToken =
+    googleAuth.getAccessToken();
+
+  if (!plan || !accessToken) {
+    setMessage(
+      elements.driveImportMessage,
+      "Preview the whole folder before importing.",
+      "error"
+    );
+    return;
+  }
+
+  if (
+    state.driveSourceFolder?.id !==
+      plan.sourceFolderId
+  ) {
+    clearWholeFolderPlan();
+
+    setMessage(
+      elements.driveImportMessage,
+      "Source folder changed. Select the folder + subfolders mode again.",
+      "error"
+    );
+    return;
+  }
+
+  state.wholeFolderImporting = true;
+  updateDriveImportControls();
+
+  const counts = {
+    imported: 0,
+    replaced: 0,
+    skipped: 0,
+    blocked: 0,
+    failed: 0,
+  };
+
+  try {
+    await importWholeFolderNode(
+      accessToken,
+      plan.tree,
+      plan.destinationFolderId,
+      state.wholeFolderDuplicatePolicy,
+      counts
+    );
+
+    const resultParts = [];
+
+    if (counts.imported > 0) {
+      resultParts.push(
+        `${counts.imported} imported`
+      );
+    }
+
+    if (counts.replaced > 0) {
+      resultParts.push(
+        `${counts.replaced} replaced`
+      );
+    }
+
+    if (counts.skipped > 0) {
+      resultParts.push(
+        `${counts.skipped} skipped`
+      );
+    }
+
+    if (counts.blocked > 0) {
+      resultParts.push(
+        `${counts.blocked} blocked`
+      );
+    }
+
+    if (counts.failed > 0) {
+      resultParts.push(
+        `${counts.failed} failed`
+      );
+    }
+
+    setMessage(
+      elements.driveImportMessage,
+      resultParts.length > 0
+        ? `Whole folder import complete: ${resultParts.join(", ")}.`
+        : "Whole folder import completed with no file changes.",
+      counts.blocked > 0 ||
+        counts.failed > 0
+        ? "error"
+        : "success"
+    );
+
+    // Refresh root-level destination choices and current library view. Nested
+    // folders are discovered dynamically by My Books on navigation.
+    await loadDriveImportFolders();
+    await loadLibrary();
+
+    state.wholeFolderPlan = null;
+    renderWholeFolderPreview();
+  } catch (error) {
+    setMessage(
+      elements.driveImportMessage,
+      `Whole folder import failed: ${getErrorMessage(error)}`,
+      "error"
+    );
+  } finally {
+    state.wholeFolderImporting = false;
+    renderWholeFolderPreview();
     updateDriveImportControls();
   }
 }
@@ -1054,13 +1861,11 @@ function setDriveImportDuplicateAction(
 function handleClearDriveSelection() {
   if (
     state.busy ||
-    state.driveImporting ||
-    state.driveSourceScanning
+    state.driveImporting
   ) {
     return;
   }
 
-  state.driveSelectionMode = "selected";
   state.driveSelection = [];
   clearMessage(elements.driveImportMessage);
   renderDriveSelection();
@@ -1185,7 +1990,8 @@ function updateDriveImportControls() {
     !state.busy &&
     !state.driveImporting &&
     !state.driveSourceFolderPicking &&
-    !state.driveSourceScanning &&
+    !state.wholeFolderScanning &&
+    !state.wholeFolderImporting &&
     googleAuth.isConnected();
 
   const pickerReady =
@@ -1219,13 +2025,31 @@ function updateDriveImportControls() {
 
   elements.openDrivePicker.disabled = !canOpen;
 
-  elements.useAllSourceBooks.disabled =
+  elements.previewWholeFolder.disabled =
     !canOpen;
 
-  elements.useAllSourceBooks.textContent =
-    state.driveSourceScanning
-      ? "Scanning source folder…"
-      : "Use all books from source folder";
+  elements.previewWholeFolder.textContent =
+    state.wholeFolderScanning
+      ? "Scanning whole folder…"
+      : state.wholeFolderPlan
+        ? "Refresh folder + subfolders"
+        : "This folder + subfolders";
+
+  elements.importWholeFolder.disabled =
+    !ready ||
+    !state.wholeFolderPlan;
+
+  elements.importWholeFolder.textContent =
+    state.wholeFolderImporting
+      ? "Importing whole folder…"
+      : "Confirm import";
+
+  elements.wholeFolderDuplicatePolicy.disabled =
+    state.wholeFolderImporting;
+
+  elements.clearWholeFolderPreview.disabled =
+    state.wholeFolderImporting ||
+    !state.wholeFolderPlan;
 
   elements.clearDriveSelection.disabled =
     !ready ||
@@ -1237,13 +2061,13 @@ function updateDriveImportControls() {
   elements.importDriveBooks.textContent =
     state.driveImporting
       ? "Importing…"
-      : state.driveSelectionMode === "all"
-        ? "Import all books"
-        : "Import selected books";
+      : "Import selected books";
 
   const destinationReady =
     !state.busy &&
     !state.driveImporting &&
+    !state.wholeFolderScanning &&
+    !state.wholeFolderImporting &&
     !state.driveFoldersLoading &&
     googleAuth.isConnected() &&
     Boolean(state.storage?.books?.id);
@@ -3273,9 +4097,10 @@ function disableBookSelection() {
  */
 function setDisconnectedState() {
   state.driveSourceFolder = null;
-  state.driveSelectionMode = "selected";
+  state.wholeFolderPlan = null;
   state.driveSelection = [];
   renderDriveSourceFolder();
+  renderWholeFolderPreview();
   renderDriveSelection();
   setConnectionStatus(
     "Google Drive: Not connected",

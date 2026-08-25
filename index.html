@@ -155,8 +155,7 @@
       <h2 id="drive-import-title">Import from Google Drive</h2>
 
       <p class="help-text">
-        Choose a source folder first, then select EPUB/PDF books from that
-        folder. Google copies the selected files directly into KOCloud/Books.
+        Choose a source folder, then choose how much of it you want to import.
       </p>
 
       <label>Source folder</label>
@@ -177,28 +176,131 @@
         No source folder selected.
       </p>
 
+      <label>Import</label>
+
       <button
         id="open-drive-picker"
         type="button"
         class="secondary-button full-width"
         disabled
       >
-        Select books from source folder
+        Select books
       </button>
 
       <button
-        id="use-all-source-books"
+        id="preview-whole-folder"
         type="button"
         class="secondary-button full-width"
         disabled
       >
-        Use all books from source folder
+        This folder + subfolders
       </button>
 
       <p class="help-text">
-        "Use all" loads every EPUB/PDF directly in the source folder into the
-        preview. Nothing is copied until you confirm the import below.
+        Select individual books, or import the whole source folder recursively
+        while preserving its folder structure.
       </p>
+
+      <div class="upload-actions">
+        <label for="drive-import-destination">
+          Destination
+        </label>
+
+        <select
+          id="drive-import-destination"
+          class="destination-select"
+          disabled
+        >
+          <option value="">
+            KOCloud / Books
+          </option>
+        </select>
+
+        <div class="destination-create">
+          <input
+            id="new-book-folder-name"
+            type="text"
+            autocomplete="off"
+            placeholder="New folder name"
+            disabled
+          >
+
+          <button
+            id="create-book-folder"
+            type="button"
+            class="secondary-button"
+            disabled
+          >
+            Create folder
+          </button>
+        </div>
+
+        <p
+          id="destination-message"
+          class="message"
+          aria-live="polite"
+        ></p>
+      </div>
+
+
+      <div
+        id="whole-folder-preview"
+        class="upload-queue"
+        hidden
+      >
+        <div class="queue-header">
+          <strong id="whole-folder-summary">
+            Folder + subfolders
+          </strong>
+
+          <button
+            id="clear-whole-folder-preview"
+            type="button"
+            class="text-button"
+          >
+            Clear
+          </button>
+        </div>
+
+        <p
+          id="whole-folder-target"
+          class="help-text"
+        ></p>
+
+        <label for="whole-folder-duplicate-policy">
+          Duplicate files
+        </label>
+
+        <select
+          id="whole-folder-duplicate-policy"
+          class="destination-select"
+        >
+          <option value="skip" selected>
+            Skip existing
+          </option>
+          <option value="replace">
+            Replace existing
+          </option>
+          <option value="keep-both">
+            Keep both
+          </option>
+        </select>
+
+        <p class="help-text">
+          Existing folders with the same name are reused.
+          The summary covers the recursive source tree; only EPUB/PDF files
+          are imported.
+        </p>
+
+        <button
+          id="import-whole-folder"
+          type="button"
+          class="primary-button full-width"
+          disabled
+        >
+          Confirm import
+        </button>
+      </div>
 
       <div id="drive-selection-empty" class="queue-empty">
         No Drive books selected.
@@ -222,45 +324,6 @@
         <ul id="drive-selection-list" class="queue-list"></ul>
 
         <div class="upload-actions">
-          <label for="drive-import-destination">
-            Destination
-          </label>
-
-          <select
-            id="drive-import-destination"
-            class="destination-select"
-            disabled
-          >
-            <option value="">
-              KOCloud / Books
-            </option>
-          </select>
-
-          <div class="destination-create">
-            <input
-              id="new-book-folder-name"
-              type="text"
-              autocomplete="off"
-              placeholder="New folder name"
-              disabled
-            >
-
-            <button
-              id="create-book-folder"
-              type="button"
-              class="secondary-button"
-              disabled
-            >
-              Create folder
-            </button>
-          </div>
-
-          <p
-            id="destination-message"
-            class="message"
-            aria-live="polite"
-          ></p>
-
           <button
             id="import-drive-books"
             type="button"
