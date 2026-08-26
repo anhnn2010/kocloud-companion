@@ -177,6 +177,62 @@
         No source folder selected.
       </p>
 
+      <div
+        id="drive-source-browser"
+        class="source-folder-browser"
+        hidden
+      >
+        <div class="library-navigation">
+          <button
+            id="drive-source-back"
+            type="button"
+            class="secondary-button compact-button"
+            disabled
+          >
+            ← Back
+          </button>
+
+          <div
+            id="drive-source-path"
+            class="library-path"
+            aria-label="Current source folder"
+          >
+            My Drive
+          </div>
+        </div>
+
+        <div
+          id="drive-source-empty"
+          class="library-empty"
+          hidden
+        >
+          This folder has no subfolders.
+        </div>
+
+        <ul
+          id="drive-source-list"
+          class="library-list"
+        ></ul>
+
+        <div class="source-folder-actions">
+          <button
+            id="cancel-drive-source-folder"
+            type="button"
+            class="secondary-button"
+          >
+            Cancel
+          </button>
+
+          <button
+            id="use-drive-source-folder"
+            type="button"
+            class="primary-button"
+          >
+            Use this folder
+          </button>
+        </div>
+      </div>
+
       <div class="upload-actions">
         <label for="drive-import-destination">
           Destination

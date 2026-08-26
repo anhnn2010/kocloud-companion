@@ -767,3 +767,39 @@ progress {
     align-self: flex-start;
   }
 }
+
+
+/* Google Drive source folder browser */
+
+.source-folder-browser {
+  margin: 12px 0 4px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: #fafbfc;
+}
+
+.source-folder-browser .library-navigation {
+  margin-top: 0;
+}
+
+.source-folder-browser .library-list {
+  background: var(--surface);
+}
+
+.source-folder-browser .library-empty {
+  margin-bottom: 0;
+}
+
+.source-folder-actions {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+@media (min-width: 640px) {
+  .source-folder-actions {
+    grid-template-columns: auto auto;
+    justify-content: end;
+  }
+}

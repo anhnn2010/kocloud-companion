@@ -19,6 +19,20 @@ const elements = {
     document.getElementById("choose-drive-source-folder"),
   driveSourceFolder:
     document.getElementById("drive-source-folder"),
+  driveSourceBrowser:
+    document.getElementById("drive-source-browser"),
+  driveSourceBack:
+    document.getElementById("drive-source-back"),
+  driveSourcePath:
+    document.getElementById("drive-source-path"),
+  driveSourceEmpty:
+    document.getElementById("drive-source-empty"),
+  driveSourceList:
+    document.getElementById("drive-source-list"),
+  cancelDriveSourceFolder:
+    document.getElementById("cancel-drive-source-folder"),
+  useDriveSourceFolder:
+    document.getElementById("use-drive-source-folder"),
   openDrivePicker: document.getElementById("open-drive-picker"),
   previewWholeFolder:
     document.getElementById("preview-whole-folder"),
@@ -98,6 +112,9 @@ const state = {
   registeringAllFolderBooks: false,
   driveSourceFolder: null,
   driveSourceFolderPicking: false,
+  driveSourceBrowserFolders: [],
+  driveSourceBrowserPath: [],
+  driveSourceBrowserLoading: false,
   wholeFolderScanning: false,
   wholeFolderImporting: false,
   wholeFolderPlan: null,
@@ -123,6 +140,7 @@ function init() {
   setDisconnectedState();
   renderQueue();
   renderDriveSourceFolder();
+  renderDriveSourceBrowser();
   renderWholeFolderPreview();
   renderDriveSelection();
 
@@ -174,6 +192,21 @@ function init() {
   elements.chooseDriveSourceFolder.addEventListener(
     "click",
     handleChooseDriveSourceFolder
+  );
+
+  elements.driveSourceBack.addEventListener(
+    "click",
+    handleDriveSourceBack
+  );
+
+  elements.cancelDriveSourceFolder.addEventListener(
+    "click",
+    handleCancelDriveSourceFolder
+  );
+
+  elements.useDriveSourceFolder.addEventListener(
+    "click",
+    handleUseDriveSourceFolder
   );
 
   elements.openDrivePicker.addEventListener(
@@ -669,10 +702,10 @@ async function handleCreateBookFolder() {
 }
 
 /**
- * Choose the Google Drive folder that acts as the import source scope.
+ * Open the hierarchical Google Drive source-folder browser.
  *
- * Changing source clears the previous book selection so files from different
- * source contexts are never mixed in one import preview.
+ * The browser starts at My Drive unless the current source was selected by
+ * this browser, in which case it reopens at the same path.
  */
 async function handleChooseDriveSourceFolder() {
   if (
@@ -699,69 +732,319 @@ async function handleChooseDriveSourceFolder() {
     return;
   }
 
-  if (!googleDrivePicker.isConfigured()) {
+  const savedPath =
+    state.driveSourceFolder?.pathEntries;
+
+  state.driveSourceBrowserPath =
+    Array.isArray(savedPath) && savedPath.length > 0
+      ? savedPath.map((entry) => ({ ...entry }))
+      : [{ id: "root", name: "My Drive" }];
+
+  state.driveSourceFolderPicking = true;
+  state.driveSourceBrowserFolders = [];
+  renderDriveSourceBrowser();
+  updateDriveImportControls();
+
+  const loaded = await loadDriveSourceBrowserFolder();
+
+  if (!loaded) {
+    closeDriveSourceBrowser();
+  }
+}
+
+/**
+ * Return the folder currently displayed by the source-folder browser.
+ *
+ * @returns {object|null}
+ */
+function getCurrentDriveSourceBrowserFolder() {
+  return (
+    state.driveSourceBrowserPath[
+      state.driveSourceBrowserPath.length - 1
+    ] || null
+  );
+}
+
+/**
+ * Load only direct child folders for the current browser location.
+ *
+ * @returns {Promise<boolean>} whether loading succeeded
+ */
+async function loadDriveSourceBrowserFolder() {
+  const accessToken = googleAuth.getAccessToken();
+  const currentFolder =
+    getCurrentDriveSourceBrowserFolder();
+
+  if (!accessToken || !currentFolder?.id) {
+    return false;
+  }
+
+  state.driveSourceBrowserLoading = true;
+  renderDriveSourceBrowser();
+
+  try {
+    state.driveSourceBrowserFolders =
+      await googleDriveApi.listChildFolders(
+        accessToken,
+        currentFolder.id
+      );
+
+    renderDriveSourceBrowser();
+    return true;
+  } catch (error) {
+    state.driveSourceBrowserFolders = [];
+    renderDriveSourceBrowser();
+
     setMessage(
       elements.driveImportMessage,
-      "Save Google Picker API key and project number first.",
+      `Could not load Drive folders: ${getErrorMessage(error)}`,
       "error"
     );
+
+    return false;
+  } finally {
+    state.driveSourceBrowserLoading = false;
+    renderDriveSourceBrowser();
+  }
+}
+
+/**
+ * Open one child folder in the source-folder browser.
+ *
+ * @param {object} folder
+ */
+async function handleOpenDriveSourceFolder(folder) {
+  if (
+    state.driveSourceBrowserLoading ||
+    !folder?.id
+  ) {
     return;
   }
 
-  state.driveSourceFolderPicking = true;
-  updateDriveImportControls();
+  state.driveSourceBrowserPath.push({
+    id: folder.id,
+    name: folder.name || "Folder",
+  });
 
-  try {
-    const folder =
-      await googleDrivePicker.pickFolder(
-        accessToken
-      );
+  const loaded = await loadDriveSourceBrowserFolder();
 
-    if (!folder?.id) {
-      return;
-    }
-
-    const sourceChanged =
-      state.driveSourceFolder?.id !== folder.id;
-
-    state.driveSourceFolder = folder;
-
-    if (sourceChanged) {
-      state.driveSelection = [];
-      clearWholeFolderPlan();
-      renderDriveSelection();
-    }
-
-    renderDriveSourceFolder();
-
-    setMessage(
-      elements.driveImportMessage,
-      `Source folder selected: ${folder.name}.`,
-      "success"
-    );
-  } catch (error) {
-    setMessage(
-      elements.driveImportMessage,
-      getErrorMessage(error),
-      "error"
-    );
-  } finally {
-    state.driveSourceFolderPicking = false;
-    updateDriveImportControls();
+  if (!loaded) {
+    state.driveSourceBrowserPath.pop();
+    renderDriveSourceBrowser();
   }
+}
+
+/**
+ * Navigate to the parent folder in the source-folder browser.
+ */
+async function handleDriveSourceBack() {
+  if (
+    state.driveSourceBrowserLoading ||
+    state.driveSourceBrowserPath.length <= 1
+  ) {
+    return;
+  }
+
+  const removedFolder =
+    state.driveSourceBrowserPath.pop();
+
+  const loaded = await loadDriveSourceBrowserFolder();
+
+  if (!loaded && removedFolder) {
+    state.driveSourceBrowserPath.push(removedFolder);
+    renderDriveSourceBrowser();
+  }
+}
+
+/**
+ * Cancel source-folder browsing without changing the selected source.
+ */
+function handleCancelDriveSourceFolder() {
+  if (state.driveSourceBrowserLoading) {
+    return;
+  }
+
+  closeDriveSourceBrowser();
+}
+
+/**
+ * Use the browser's current folder as the Drive import source.
+ */
+function handleUseDriveSourceFolder() {
+  if (state.driveSourceBrowserLoading) {
+    return;
+  }
+
+  const currentFolder =
+    getCurrentDriveSourceBrowserFolder();
+
+  if (!currentFolder?.id) {
+    return;
+  }
+
+  const sourceChanged =
+    state.driveSourceFolder?.id !== currentFolder.id;
+
+  state.driveSourceFolder = {
+    id: currentFolder.id,
+    name: currentFolder.name || "Folder",
+    pathEntries:
+      state.driveSourceBrowserPath.map(
+        (entry) => ({ ...entry })
+      ),
+  };
+
+  if (sourceChanged) {
+    state.driveSelection = [];
+    clearWholeFolderPlan();
+    renderDriveSelection();
+  }
+
+  renderDriveSourceFolder();
+  closeDriveSourceBrowser();
+
+  setMessage(
+    elements.driveImportMessage,
+    `Source folder selected: ${getDriveSourceFolderPath()}.`,
+    "success"
+  );
+}
+
+/**
+ * Close and reset the source-folder browser.
+ */
+function closeDriveSourceBrowser() {
+  state.driveSourceFolderPicking = false;
+  state.driveSourceBrowserLoading = false;
+  state.driveSourceBrowserFolders = [];
+  state.driveSourceBrowserPath = [];
+  renderDriveSourceBrowser();
+  updateDriveImportControls();
+}
+
+/**
+ * Return the selected Drive source path for display.
+ *
+ * @returns {string}
+ */
+function getDriveSourceFolderPath() {
+  const folder = state.driveSourceFolder;
+
+  if (!folder) {
+    return "";
+  }
+
+  if (
+    Array.isArray(folder.pathEntries) &&
+    folder.pathEntries.length > 0
+  ) {
+    return folder.pathEntries
+      .map((entry) => entry.name || "Folder")
+      .join(" / ");
+  }
+
+  return folder.name || "Folder";
 }
 
 /**
  * Render the currently selected Drive source folder.
  */
 function renderDriveSourceFolder() {
-  const folder =
-    state.driveSourceFolder;
+  const path = getDriveSourceFolderPath();
 
   elements.driveSourceFolder.textContent =
-    folder?.name
-      ? `Selected: ${folder.name}`
+    path
+      ? `Selected: ${path}`
       : "No source folder selected.";
+}
+
+/**
+ * Render the hierarchical source-folder browser.
+ */
+function renderDriveSourceBrowser() {
+  const open = state.driveSourceFolderPicking;
+
+  elements.driveSourceBrowser.hidden = !open;
+
+  if (!open) {
+    elements.driveSourceList.replaceChildren();
+    elements.driveSourceEmpty.hidden = true;
+    return;
+  }
+
+  const pathNames =
+    state.driveSourceBrowserPath.map(
+      (entry) => entry.name || "Folder"
+    );
+
+  elements.driveSourcePath.textContent =
+    pathNames.join(" / ") || "My Drive";
+
+  elements.driveSourceBack.disabled =
+    state.driveSourceBrowserLoading ||
+    state.driveSourceBrowserPath.length <= 1;
+
+  elements.cancelDriveSourceFolder.disabled =
+    state.driveSourceBrowserLoading;
+
+  elements.useDriveSourceFolder.disabled =
+    state.driveSourceBrowserLoading ||
+    !getCurrentDriveSourceBrowserFolder()?.id;
+
+  elements.driveSourceList.replaceChildren();
+
+  if (state.driveSourceBrowserLoading) {
+    elements.driveSourceEmpty.hidden = false;
+    elements.driveSourceEmpty.textContent =
+      "Loading folders…";
+    return;
+  }
+
+  const folders = state.driveSourceBrowserFolders;
+
+  elements.driveSourceEmpty.hidden =
+    folders.length > 0;
+
+  elements.driveSourceEmpty.textContent =
+    "This folder has no subfolders.";
+
+  for (const folder of folders) {
+    const item = document.createElement("li");
+    item.className = "library-folder-item";
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "library-folder-button";
+    button.disabled = state.driveSourceBrowserLoading;
+
+    const main = document.createElement("span");
+    main.className = "library-folder-main";
+
+    const icon = document.createElement("span");
+    icon.className = "library-folder-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = "📁";
+
+    const name = document.createElement("span");
+    name.className = "library-item-name";
+    name.textContent = folder.name || "Folder";
+
+    const arrow = document.createElement("span");
+    arrow.className = "library-folder-arrow";
+    arrow.setAttribute("aria-hidden", "true");
+    arrow.textContent = "›";
+
+    main.append(icon, name);
+    button.append(main, arrow);
+
+    button.addEventListener(
+      "click",
+      () => handleOpenDriveSourceFolder(folder)
+    );
+
+    item.append(button);
+    elements.driveSourceList.append(item);
+  }
 }
 
 /**
@@ -1998,9 +2281,16 @@ function updateDriveImportControls() {
     ready &&
     googleDrivePicker.isConfigured();
 
-  const canOpen =
-    pickerReady &&
+  const hasSourceFolder =
     Boolean(state.driveSourceFolder?.id);
+
+  const canOpenPicker =
+    pickerReady &&
+    hasSourceFolder;
+
+  const canScanSource =
+    ready &&
+    hasSourceFolder;
 
   const canImport =
     ready &&
@@ -2014,19 +2304,20 @@ function updateDriveImportControls() {
     );
 
   elements.chooseDriveSourceFolder.disabled =
-    !pickerReady;
+    !ready;
 
   elements.chooseDriveSourceFolder.textContent =
     state.driveSourceFolderPicking
-      ? "Opening Google Drive…"
+      ? "Choosing source folder…"
       : state.driveSourceFolder
         ? "Change source folder"
         : "Choose source folder";
 
-  elements.openDrivePicker.disabled = !canOpen;
+  elements.openDrivePicker.disabled =
+    !canOpenPicker;
 
   elements.previewWholeFolder.disabled =
-    !canOpen;
+    !canScanSource;
 
   elements.previewWholeFolder.textContent =
     state.wholeFolderScanning
@@ -4097,9 +4388,14 @@ function disableBookSelection() {
  */
 function setDisconnectedState() {
   state.driveSourceFolder = null;
+  state.driveSourceFolderPicking = false;
+  state.driveSourceBrowserFolders = [];
+  state.driveSourceBrowserPath = [];
+  state.driveSourceBrowserLoading = false;
   state.wholeFolderPlan = null;
   state.driveSelection = [];
   renderDriveSourceFolder();
+  renderDriveSourceBrowser();
   renderWholeFolderPreview();
   renderDriveSelection();
   setConnectionStatus(
