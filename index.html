@@ -92,9 +92,48 @@
       <h2 id="upload-title">Add books</h2>
 
       <p class="help-text">
-        Choose one or more EPUB/PDF files. KOCloud uploads them one at a
-        time directly from this browser to your Google Drive Books folder.
+        Choose a destination, then select one or more EPUB/PDF files.
+        KOCloud uploads them one at a time directly from this browser.
       </p>
+
+      <label for="upload-destination">
+        Destination
+      </label>
+
+      <select
+        id="upload-destination"
+        class="destination-select"
+        disabled
+      >
+        <option value="">
+          KOCloud / Books
+        </option>
+      </select>
+
+      <div class="destination-create">
+        <input
+          id="new-upload-folder-name"
+          type="text"
+          autocomplete="off"
+          placeholder="New folder name"
+          disabled
+        >
+
+        <button
+          id="create-upload-folder"
+          type="button"
+          class="secondary-button"
+          disabled
+        >
+          Create folder
+        </button>
+      </div>
+
+      <p
+        id="upload-destination-message"
+        class="message"
+        aria-live="polite"
+      ></p>
 
       <label class="file-picker" for="book-files">
         Choose EPUB / PDF files
