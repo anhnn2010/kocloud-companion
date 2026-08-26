@@ -481,29 +481,31 @@
         </div>
       </div>
 
-      <button
-        id="register-folder-books"
-        type="button"
-        class="secondary-button full-width"
-        disabled
-      >
-        Register selected books
-      </button>
+      <div id="library-register-controls" hidden>
+        <button
+          id="register-folder-books"
+          type="button"
+          class="secondary-button full-width"
+          disabled
+        >
+          Register selected books
+        </button>
 
-      <button
-        id="register-all-folder-books"
-        type="button"
-        class="secondary-button full-width"
-        disabled
-      >
-        Register all books in this folder
-      </button>
+        <button
+          id="register-all-folder-books"
+          type="button"
+          class="secondary-button full-width"
+          disabled
+        >
+          Register all books in this folder
+        </button>
 
-      <p class="help-text">
-        Use these after adding supported book files directly in Google Drive.
-        Registration keeps the same files, folders, and Drive file IDs.
-        "Register all" scans only this folder, not its subfolders.
-      </p>
+        <p class="help-text">
+          Use these after adding supported book files directly in Google Drive.
+          Registration keeps the same files, folders, and Drive file IDs.
+          "Register all" scans only this folder, not its subfolders.
+        </p>
+      </div>
 
       <div id="library-empty" class="library-empty">
         Connect Google Drive to load your library.
