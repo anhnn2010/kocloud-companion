@@ -92,8 +92,9 @@
       <h2 id="upload-title">Add books</h2>
 
       <p class="help-text">
-        Choose a destination, then select one or more EPUB/PDF files.
-        KOCloud uploads them one at a time directly from this browser.
+        Choose a destination, then select one or more KOReader-supported
+        book files. KOCloud uploads them one at a time directly from this
+        browser.
       </p>
 
       <label for="upload-destination">
@@ -136,14 +137,14 @@
       ></p>
 
       <label class="file-picker" for="book-files">
-        Choose EPUB / PDF files
+        Choose book files
       </label>
 
       <input
         id="book-files"
         class="visually-hidden"
         type="file"
-        accept=".epub,.pdf,application/epub+zip,application/pdf"
+        accept=".epub,.pdf,.djvu,.djv,.fb2,.mobi,.azw,.doc,.docx,.rtf,.html,.htm,.xhtml,.chm,.txt,.md,.cbz,.cbr,.cbt,.pdb,.prc,.xps,.zip"
         multiple
         disabled
       >
@@ -384,8 +385,8 @@
 
         <p class="help-text">
           Existing folders with the same name are reused.
-          The summary covers the recursive source tree; only EPUB/PDF files
-          are imported.
+          The summary covers the recursive source tree; only supported
+          KOReader book formats are imported.
         </p>
 
         <button
@@ -499,7 +500,7 @@
       </button>
 
       <p class="help-text">
-        Use these after adding EPUB/PDF files directly in Google Drive.
+        Use these after adding supported book files directly in Google Drive.
         Registration keeps the same files, folders, and Drive file IDs.
         "Register all" scans only this folder, not its subfolders.
       </p>

@@ -1,3 +1,8 @@
+import {
+  getBookMimeType,
+  isSupportedBookName,
+} from "../book-formats.js";
+
 const DRIVE_FILES_URL =
   "https://www.googleapis.com/drive/v3/files";
 
@@ -759,32 +764,20 @@ export class GoogleDriveApi {
    * @returns {string}
    */
   getBookMimeType(file) {
-    const lowerName = file.name.toLowerCase();
-
-    if (lowerName.endsWith(".epub")) {
-      return "application/epub+zip";
-    }
-
-    if (lowerName.endsWith(".pdf")) {
-      return "application/pdf";
-    }
-
-    return file.type || "application/octet-stream";
+    return getBookMimeType(
+      file.name,
+      file.type || ""
+    );
   }
 
   /**
    * Return whether the file is supported by Companion.
    *
-   * @param {File} file
+   * @param {{name: string}} file
    * @returns {boolean}
    */
   isSupportedBook(file) {
-    const lowerName = file.name.toLowerCase();
-
-    return (
-      lowerName.endsWith(".epub") ||
-      lowerName.endsWith(".pdf")
-    );
+    return isSupportedBookName(file.name);
   }
 }
 

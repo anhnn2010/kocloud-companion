@@ -7,11 +7,6 @@ const PICKER_APP_ID_STORAGE_KEY =
 const PICKER_SCRIPT_URL =
   "https://apis.google.com/js/api.js";
 
-const BOOK_MIME_TYPES = [
-  "application/epub+zip",
-  "application/pdf",
-];
-
 let pickerLibraryPromise = null;
 
 /**
@@ -142,7 +137,7 @@ export class GoogleDrivePicker {
   }
 
   /**
-   * Open Google Picker for EPUB/PDF selection.
+   * Open Google Picker for selecting KOReader-supported books.
    *
    * The view intentionally does not set ownedByMe, so both user-owned and
    * shared-with-user files can be shown.
@@ -160,7 +155,7 @@ export class GoogleDrivePicker {
     accessToken,
     {
       parentId = "",
-      title = "Select EPUB / PDF books",
+      title = "Select KOReader books",
     } = {}
   ) {
     if (!accessToken) {
@@ -185,10 +180,6 @@ export class GoogleDrivePicker {
           new google.picker.DocsView(
             google.picker.ViewId.DOCS
           );
-
-        view.setMimeTypes(
-          BOOK_MIME_TYPES.join(",")
-        );
 
         view.setIncludeFolders(true);
         view.setSelectFolderEnabled(false);

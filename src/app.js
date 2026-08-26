@@ -5,6 +5,10 @@ import {
   BrowserUploadTask,
   UploadCancelledError,
 } from "./google-drive/upload.js";
+import {
+  getBookFormatLabel,
+  SUPPORTED_BOOK_ACCEPT,
+} from "./book-formats.js";
 
 const elements = {
   clientId: document.getElementById("google-client-id"),
@@ -142,6 +146,7 @@ const state = {
  */
 function init() {
   elements.clientId.value = googleAuth.getClientId();
+  elements.bookFiles.accept = SUPPORTED_BOOK_ACCEPT;
 
   const pickerConfig = googleDrivePicker.getConfig();
   elements.pickerApiKey.value = pickerConfig.apiKey;
@@ -1535,10 +1540,27 @@ async function handleOpenDrivePicker() {
       return;
     }
 
+    const supportedBooks =
+      selectedBooks.filter((book) =>
+        googleDriveApi.isSupportedBook(book)
+      );
+
+    const unsupportedCount =
+      selectedBooks.length -
+      supportedBooks.length;
+
+    if (supportedBooks.length === 0) {
+      setMessage(
+        elements.driveImportMessage,
+        "No supported KOReader book formats were selected.",
+        "error"
+      );
+      return;
+    }
+
     clearWholeFolderPlan();
 
-
-    state.driveSelection = selectedBooks.map(
+    state.driveSelection = supportedBooks.map(
       (book) => ({
         ...book,
         importStatus: "selected",
@@ -1560,8 +1582,12 @@ async function handleOpenDrivePicker() {
 
     setMessage(
       elements.driveImportMessage,
-      `${selectedBooks.length} Drive book` +
-        `${selectedBooks.length === 1 ? "" : "s"} selected.` +
+      `${supportedBooks.length} Drive book` +
+        `${supportedBooks.length === 1 ? "" : "s"} selected.` +
+        (unsupportedCount > 0
+          ? ` ${unsupportedCount} unsupported file` +
+            `${unsupportedCount === 1 ? " was" : "s were"} skipped.`
+          : "") +
         duplicateText,
       "success"
     );
@@ -1583,7 +1609,7 @@ async function handleOpenDrivePicker() {
  * Scan one Drive source folder recursively.
  *
  * The preview keeps the complete source folder tree. Branches with no
- * supported EPUB/PDF books are marked in the preview and skipped during import.
+ * supported KOReader books are marked in the preview and skipped during import.
  *
  * @param {string} accessToken
  * @param {{id: string, name: string}} folder
@@ -1930,7 +1956,7 @@ async function handlePreviewWholeFolder() {
     if (tree.bookCount === 0) {
       setMessage(
         elements.driveImportMessage,
-        `No EPUB/PDF books were found in ${sourceFolder.name} or its subfolders.`,
+        `No supported books were found in ${sourceFolder.name} or its subfolders.`,
         "success"
       );
       return;
@@ -2613,7 +2639,7 @@ function renderDriveSelection() {
     const type = document.createElement("div");
     type.className = "queue-item-size";
     type.textContent =
-      formatDriveBookType(book.mimeType);
+      getBookFormatLabel(book.name);
 
     main.append(name, type);
 
@@ -3140,25 +3166,7 @@ function getDriveImportStatusText(book) {
 }
 
 /**
- * Return a short file-type label for Drive Picker results.
- *
- * @param {string} mimeType
- * @returns {string}
- */
-function formatDriveBookType(mimeType) {
-  if (mimeType === "application/epub+zip") {
-    return "EPUB";
-  }
-
-  if (mimeType === "application/pdf") {
-    return "PDF";
-  }
-
-  return "Book";
-}
-
-/**
- * Register EPUB/PDF files that already exist in the current My Books folder.
+ * Register supported book files that already exist in the current My Books folder.
  *
  * The Picker is deliberately scoped to the current folder. Registration only
  * adds KOCloud appProperties; it does not copy, move, rename, or replace the
@@ -3209,9 +3217,15 @@ async function handleRegisterFolderBooks() {
     let alreadyRegistered = 0;
     let readOnly = 0;
     let outsideFolder = 0;
+    let unsupported = 0;
     let failed = 0;
 
     for (const selected of selectedBooks) {
+      if (!googleDriveApi.isSupportedBook(selected)) {
+        unsupported += 1;
+        continue;
+      }
+
       try {
         // Picker normally returns parentId for a scoped DocsView. If it does,
         // use that direct selection context instead of trying to infer folder
@@ -3295,6 +3309,12 @@ async function handleRegisterFolderBooks() {
       );
     }
 
+    if (unsupported > 0) {
+      parts.push(
+        `${unsupported} unsupported`
+      );
+    }
+
     if (failed > 0) {
       parts.push(
         `${failed} failed`
@@ -3323,7 +3343,7 @@ async function handleRegisterFolderBooks() {
 }
 
 /**
- * Register all EPUB/PDF files directly inside the current My Books folder.
+ * Register all supported book files directly inside the current My Books folder.
  *
  * This operation is non-recursive and only adds KOCloud appProperties in
  * place. It never copies, moves, renames, replaces, or deletes files.
@@ -3370,7 +3390,7 @@ async function handleRegisterAllFolderBooks() {
     if (books.length === 0) {
       setMessage(
         elements.libraryMessage,
-        "No EPUB/PDF files were found directly in this folder.",
+        "No supported book files were found directly in this folder.",
         "success"
       );
       return;
@@ -3994,7 +4014,7 @@ async function handleBookSelection() {
       elements.uploadMessage,
       `${rejected.length} unsupported file` +
         `${rejected.length === 1 ? " was" : "s were"} skipped. ` +
-        "Only EPUB and PDF files are supported.",
+        "Only KOReader-supported book formats are accepted.",
       "error"
     );
   }
