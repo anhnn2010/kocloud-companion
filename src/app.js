@@ -1,6 +1,7 @@
 import { googleAuth } from "./google-drive/auth.js";
 import { googleDriveApi } from "./google-drive/api.js";
 import { googleDrivePicker } from "./google-drive/picker.js";
+import { LibraryService } from "./services/library.js";
 import {
   BrowserUploadTask,
   UploadCancelledError,
@@ -9,6 +10,11 @@ import {
   getBookFormatLabel,
   SUPPORTED_BOOK_ACCEPT,
 } from "./book-formats.js";
+
+const libraryService = new LibraryService({
+  driveApi: googleDriveApi,
+  getAccessToken: () => googleAuth.getAccessToken(),
+});
 
 const elements = {
   clientId: document.getElementById("google-client-id"),
@@ -390,7 +396,7 @@ async function handleConnectGoogle() {
     );
 
     const storage =
-      await googleDriveApi.resolveBooksStorage(
+      await libraryService.resolveStorage(
         accessToken
       );
 
@@ -459,8 +465,7 @@ async function loadDriveImportFolders() {
 
   try {
     state.driveFolders =
-      await googleDriveApi.listChildFolders(
-        accessToken,
+      await libraryService.listFolders(
         booksFolderId
       );
 
@@ -762,8 +767,7 @@ async function handleCreateUploadFolder() {
 
   try {
     const childFolders =
-      await googleDriveApi.listChildFolders(
-        accessToken,
+      await libraryService.listFolders(
         parentFolderId
       );
 
@@ -820,8 +824,7 @@ async function handleCreateUploadFolder() {
 
   try {
     const createdFolder =
-      await googleDriveApi.createBookFolder(
-        accessToken,
+      await libraryService.createFolder(
         parentFolderId,
         folderName
       );
@@ -1007,8 +1010,7 @@ async function handleCreateBookFolder() {
 
   try {
     const childFolders =
-      await googleDriveApi.listChildFolders(
-        accessToken,
+      await libraryService.listFolders(
         parentFolderId
       );
 
@@ -1071,8 +1073,7 @@ async function handleCreateBookFolder() {
 
   try {
     const createdFolder =
-      await googleDriveApi.createBookFolder(
-        accessToken,
+      await libraryService.createFolder(
         parentFolderId,
         folderName
       );
@@ -1542,7 +1543,7 @@ async function handleOpenDrivePicker() {
 
     const supportedBooks =
       selectedBooks.filter((book) =>
-        googleDriveApi.isSupportedBook(book)
+        libraryService.isSupportedBook(book)
       );
 
     const unsupportedCount =
@@ -1655,7 +1656,7 @@ async function scanWholeFolderTree(
 
   const files =
     directFiles.filter((file) =>
-      googleDriveApi.isSupportedBook(file)
+      libraryService.isSupportedBook(file)
     );
 
   const children = [];
@@ -1744,8 +1745,7 @@ async function countWholeFolderDuplicates(
   clearWholeFolderDuplicateMarks(node);
 
   const destinationChildren =
-    await googleDriveApi.listChildFolders(
-      accessToken,
+    await libraryService.listFolders(
       destinationParentId
     );
 
@@ -1838,8 +1838,7 @@ async function markWholeFolderDuplicatesAgainstDestination(
   let duplicateCount = 0;
 
   const destinationFiles =
-    await googleDriveApi.listBooksInFolder(
-      accessToken,
+    await libraryService.listFiles(
       destinationFolderId
     );
 
@@ -1870,8 +1869,7 @@ async function markWholeFolderDuplicatesAgainstDestination(
   }
 
   const destinationChildren =
-    await googleDriveApi.listChildFolders(
-      accessToken,
+    await libraryService.listFolders(
       destinationFolderId
     );
 
@@ -2171,8 +2169,7 @@ async function ensureWholeImportFolder(
   name
 ) {
   const children =
-    await googleDriveApi.listChildFolders(
-      accessToken,
+    await libraryService.listFolders(
       parentFolderId
     );
 
@@ -2186,8 +2183,7 @@ async function ensureWholeImportFolder(
     return existing;
   }
 
-  return googleDriveApi.createBookFolder(
-    accessToken,
+  return libraryService.createFolder(
     parentFolderId,
     name
   );
@@ -2225,8 +2221,7 @@ async function importWholeFolderNode(
     );
 
   const destinationFiles =
-    await googleDriveApi.listBooksInFolder(
-      accessToken,
+    await libraryService.listFiles(
       destinationFolder.id
     );
 
@@ -2495,8 +2490,7 @@ async function refreshDriveImportDuplicateStates() {
   }
 
   const existingBooks =
-    await googleDriveApi.listBooksInFolder(
-      accessToken,
+    await libraryService.listFiles(
       destinationFolderId
     );
 
@@ -2874,8 +2868,7 @@ async function handleImportDriveBooks() {
     // Re-read the destination immediately before import so duplicate
     // decisions remain correct if KOCloud changed after Picker selection.
     const existingBooks =
-      await googleDriveApi.listBooksInFolder(
-        accessToken,
+      await libraryService.listFiles(
         destinationFolderId
       );
 
@@ -3221,7 +3214,7 @@ async function handleRegisterFolderBooks() {
     let failed = 0;
 
     for (const selected of selectedBooks) {
-      if (!googleDriveApi.isSupportedBook(selected)) {
+      if (!libraryService.isSupportedBook(selected)) {
         unsupported += 1;
         continue;
       }
@@ -3239,8 +3232,7 @@ async function handleRegisterFolderBooks() {
         }
 
         const source =
-          await googleDriveApi.getBookRegistrationSource(
-            accessToken,
+          await libraryService.getRegistrationSource(
             selected.id
           );
 
@@ -3262,8 +3254,7 @@ async function handleRegisterFolderBooks() {
           continue;
         }
 
-        await googleDriveApi.registerExistingBook(
-          accessToken,
+        await libraryService.registerExistingBook(
           source.id,
           appProperties
         );
@@ -3377,14 +3368,13 @@ async function handleRegisterAllFolderBooks() {
 
   try {
     const directFiles =
-      await googleDriveApi.listBooksInFolder(
-        accessToken,
+      await libraryService.listFiles(
         currentFolderId
       );
 
     const books =
       directFiles.filter((file) =>
-        googleDriveApi.isSupportedBook(file)
+        libraryService.isSupportedBook(file)
       );
 
     if (books.length === 0) {
@@ -3404,8 +3394,7 @@ async function handleRegisterAllFolderBooks() {
     for (const book of books) {
       try {
         const source =
-          await googleDriveApi.getBookRegistrationSource(
-            accessToken,
+          await libraryService.getRegistrationSource(
             book.id
           );
 
@@ -3427,8 +3416,7 @@ async function handleRegisterAllFolderBooks() {
           continue;
         }
 
-        await googleDriveApi.registerExistingBook(
-          accessToken,
+        await libraryService.registerExistingBook(
           source.id,
           appProperties
         );
@@ -3571,17 +3559,10 @@ async function loadLibrary() {
   clearMessage(elements.libraryMessage);
 
   try {
-    const [folders, books] =
-      await Promise.all([
-        googleDriveApi.listChildFolders(
-          accessToken,
-          currentFolderId
-        ),
-        googleDriveApi.listManagedBooks(
-          accessToken,
-          currentFolderId
-        ),
-      ]);
+    const { folders, books } =
+      await libraryService.listFolder(
+        currentFolderId
+      );
 
     folders.sort(compareLibraryFolders);
     books.sort(compareLibraryBooks);
@@ -3981,7 +3962,7 @@ async function handleBookSelection() {
   const rejected = [];
 
   for (const file of files) {
-    if (googleDriveApi.isSupportedBook(file)) {
+    if (libraryService.isSupportedBook(file)) {
       supported.push(file);
     } else {
       rejected.push(file.name);
@@ -4033,8 +4014,7 @@ async function refreshDuplicateStates() {
   }
 
   const existingBooks =
-    await googleDriveApi.listBooksInFolder(
-      accessToken,
+    await libraryService.listFiles(
       destinationFolderId
     );
 
@@ -4195,8 +4175,7 @@ async function handleUploadAll() {
     // Re-read Drive immediately before the batch to avoid stale duplicate
     // decisions if the cloud changed after file selection.
     const existingBooks =
-      await googleDriveApi.listBooksInFolder(
-        accessToken,
+      await libraryService.listFiles(
         destinationFolderId
       );
 
@@ -4270,8 +4249,7 @@ async function handleUploadAll() {
 
         if (isReplace) {
           sessionUrl =
-            await googleDriveApi.createBookReplaceSession(
-              currentToken,
+            await libraryService.createReplaceSession(
               item.file,
               cloudExisting.id
             );
@@ -4284,8 +4262,7 @@ async function handleUploadAll() {
           }
 
           sessionUrl =
-            await googleDriveApi.createBookUploadSession(
-              currentToken,
+            await libraryService.createUploadSession(
               item.file,
               destinationFolderId,
               driveName
@@ -4295,7 +4272,7 @@ async function handleUploadAll() {
         const task = new BrowserUploadTask(
           sessionUrl,
           item.file,
-          googleDriveApi.getBookMimeType(item.file)
+          libraryService.getBookMimeType(item.file)
         );
 
         state.uploadTask = task;
