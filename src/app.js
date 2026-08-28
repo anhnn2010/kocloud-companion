@@ -3,6 +3,15 @@ import { googleDriveApi } from "./google-drive/api.js";
 import { googleDrivePicker } from "./google-drive/picker.js";
 import { LibraryService } from "./services/library.js";
 import {
+  GoogleDriveImportSource,
+} from "./imports/sources/google-drive.js";
+import { ImportPlanner } from "./imports/planner.js";
+import { ImportExecutor } from "./imports/executor.js";
+import {
+  createAvailableBookName,
+  normalizeBookName,
+} from "./core/book-names.js";
+import {
   BrowserUploadTask,
   UploadCancelledError,
 } from "./google-drive/upload.js";
@@ -14,6 +23,22 @@ import {
 const libraryService = new LibraryService({
   driveApi: googleDriveApi,
   getAccessToken: () => googleAuth.getAccessToken(),
+});
+
+const driveImportSource = new GoogleDriveImportSource({
+  driveApi: googleDriveApi,
+  getAccessToken: () => googleAuth.getAccessToken(),
+  isSupportedBook: (file) =>
+    libraryService.isSupportedBook(file),
+});
+
+const importPlanner = new ImportPlanner({
+  libraryService,
+});
+
+const importExecutor = new ImportExecutor({
+  source: driveImportSource,
+  libraryService,
 });
 
 const elements = {
@@ -1214,8 +1239,7 @@ async function loadDriveSourceBrowserFolder() {
 
   try {
     state.driveSourceBrowserFolders =
-      await googleDriveApi.listChildFolders(
-        accessToken,
+      await driveImportSource.listFolders(
         currentFolder.id
       );
 
@@ -1561,15 +1585,10 @@ async function handleOpenDrivePicker() {
 
     clearWholeFolderPlan();
 
-    state.driveSelection = supportedBooks.map(
-      (book) => ({
-        ...book,
-        importStatus: "selected",
-        importMessage: "",
-        duplicateAction: "skip",
-        existingFile: null,
-      })
-    );
+    state.driveSelection =
+      importPlanner.createSelection(
+        supportedBooks
+      );
 
     const duplicateCount =
       await refreshDriveImportDuplicateStates();
@@ -1607,298 +1626,6 @@ async function handleOpenDrivePicker() {
 }
 
 /**
- * Scan one Drive source folder recursively.
- *
- * The preview keeps the complete source folder tree. Branches with no
- * supported KOReader books are marked in the preview and skipped during import.
- *
- * @param {string} accessToken
- * @param {{id: string, name: string}} folder
- * @returns {Promise<object>}
- */
-async function scanWholeFolderTree(
-  accessToken,
-  folder,
-  ancestorIds = new Set()
-) {
-  const currentId = folder.id;
-
-  if (ancestorIds.has(currentId)) {
-    return {
-      id: currentId,
-      name: folder.name,
-      files: [],
-      children: [],
-      folderCount: 1,
-      bookCount: 0,
-      isShortcut:
-        Boolean(folder.isShortcut),
-      cycle: true,
-    };
-  }
-
-  const nextAncestorIds =
-    new Set(ancestorIds);
-
-  nextAncestorIds.add(currentId);
-
-  const [directFiles, childFolders] =
-    await Promise.all([
-      googleDriveApi.listBooksInFolder(
-        accessToken,
-        currentId
-      ),
-      googleDriveApi.listChildFolders(
-        accessToken,
-        currentId
-      ),
-    ]);
-
-  const files =
-    directFiles.filter((file) =>
-      libraryService.isSupportedBook(file)
-    );
-
-  const children = [];
-
-  for (const childFolder of childFolders) {
-    const childTree =
-      await scanWholeFolderTree(
-        accessToken,
-        childFolder,
-        nextAncestorIds
-      );
-
-    children.push(childTree);
-  }
-
-  const folderCount =
-    1 +
-    children.reduce(
-      (total, child) =>
-        total + child.folderCount,
-      0
-    );
-
-  const bookCount =
-    files.length +
-    children.reduce(
-      (total, child) =>
-        total + child.bookCount,
-      0
-    );
-
-  return {
-    id: currentId,
-    name: folder.name,
-    files,
-    children,
-    folderCount,
-    bookCount,
-    isShortcut:
-      Boolean(folder.isShortcut),
-    cycle: false,
-  };
-}
-
-/**
- * Find a direct child folder by normalized name.
- *
- * @param {Array<object>} folders
- * @param {string} name
- * @returns {object|null}
- */
-function findFolderByName(
-  folders,
-  name
-) {
-  const key = normalizeBookName(name);
-
-  return (
-    folders.find(
-      (folder) =>
-        normalizeBookName(folder.name) ===
-        key
-    ) || null
-  );
-}
-
-/**
- * Mark file-name conflicts for a source tree against the current destination.
- *
- * Each source file receives previewDuplicate=true/false so the recursive
- * preview can show exactly where conflicts occur.
- *
- * Destination folders are only inspected when a matching folder already
- * exists. Missing branches can only contain source-internal duplicates.
- *
- * @param {string} accessToken
- * @param {object} node
- * @param {string} destinationParentId
- * @returns {Promise<number>}
- */
-async function countWholeFolderDuplicates(
-  accessToken,
-  node,
-  destinationParentId
-) {
-  clearWholeFolderDuplicateMarks(node);
-
-  const destinationChildren =
-    await libraryService.listFolders(
-      destinationParentId
-    );
-
-  const destinationFolder =
-    findFolderByName(
-      destinationChildren,
-      node.name
-    );
-
-  if (!destinationFolder) {
-    return markSourceTreeInternalDuplicates(
-      node
-    );
-  }
-
-  return markWholeFolderDuplicatesAgainstDestination(
-    accessToken,
-    node,
-    destinationFolder.id
-  );
-}
-
-/**
- * Clear duplicate preview state recursively.
- *
- * @param {object} node
- */
-function clearWholeFolderDuplicateMarks(
-  node
-) {
-  for (const file of node.files) {
-    file.previewDuplicate = false;
-  }
-
-  for (const child of node.children) {
-    clearWholeFolderDuplicateMarks(
-      child
-    );
-  }
-}
-
-/**
- * Mark duplicate names inside a source subtree when the corresponding
- * destination branch does not exist yet.
- *
- * @param {object} node
- * @returns {number}
- */
-function markSourceTreeInternalDuplicates(
-  node
-) {
-  let duplicateCount = 0;
-  const names = new Set();
-
-  for (const file of node.files) {
-    const key = normalizeBookName(file.name);
-
-    if (names.has(key)) {
-      file.previewDuplicate = true;
-      duplicateCount += 1;
-    } else {
-      names.add(key);
-    }
-  }
-
-  for (const child of node.children) {
-    duplicateCount +=
-      markSourceTreeInternalDuplicates(
-        child
-      );
-  }
-
-  return duplicateCount;
-}
-
-/**
- * Mark duplicates for one source node whose matching destination folder
- * already exists.
- *
- * @param {string} accessToken
- * @param {object} node
- * @param {string} destinationFolderId
- * @returns {Promise<number>}
- */
-async function markWholeFolderDuplicatesAgainstDestination(
-  accessToken,
-  node,
-  destinationFolderId
-) {
-  let duplicateCount = 0;
-
-  const destinationFiles =
-    await libraryService.listFiles(
-      destinationFolderId
-    );
-
-  const destinationNames =
-    new Set(
-      destinationFiles.map((file) =>
-        normalizeBookName(file.name)
-      )
-    );
-
-  const sourceNames = new Set();
-
-  for (const file of node.files) {
-    const key = normalizeBookName(file.name);
-
-    const isDuplicate =
-      destinationNames.has(key) ||
-      sourceNames.has(key);
-
-    file.previewDuplicate =
-      isDuplicate;
-
-    if (isDuplicate) {
-      duplicateCount += 1;
-    }
-
-    sourceNames.add(key);
-  }
-
-  const destinationChildren =
-    await libraryService.listFolders(
-      destinationFolderId
-    );
-
-  for (const child of node.children) {
-    const destinationChild =
-      findFolderByName(
-        destinationChildren,
-        child.name
-      );
-
-    if (destinationChild) {
-      duplicateCount +=
-        await markWholeFolderDuplicatesAgainstDestination(
-          accessToken,
-          child,
-          destinationChild.id
-        );
-    } else {
-      duplicateCount +=
-        markSourceTreeInternalDuplicates(
-          child
-        );
-    }
-  }
-
-  return duplicateCount;
-}
-
-/**
  * Build a read-only recursive import preview.
  */
 async function handlePreviewWholeFolder() {
@@ -1912,9 +1639,6 @@ async function handlePreviewWholeFolder() {
     return;
   }
 
-  const accessToken =
-    googleAuth.getAccessToken();
-
   const sourceFolder =
     state.driveSourceFolder;
 
@@ -1922,7 +1646,7 @@ async function handlePreviewWholeFolder() {
     getDriveDestinationFolderId();
 
   if (
-    !accessToken ||
+    !googleAuth.getAccessToken() ||
     !sourceFolder?.id ||
     !destinationFolderId
   ) {
@@ -1946,8 +1670,7 @@ async function handlePreviewWholeFolder() {
 
   try {
     const tree =
-      await scanWholeFolderTree(
-        accessToken,
+      await driveImportSource.scanTree(
         sourceFolder
       );
 
@@ -1960,22 +1683,16 @@ async function handlePreviewWholeFolder() {
       return;
     }
 
-    const duplicateCount =
-      await countWholeFolderDuplicates(
-        accessToken,
+    state.wholeFolderPlan =
+      await importPlanner.createWholeFolderPlan(
         tree,
-        destinationFolderId
+        sourceFolder.id,
+        destinationFolderId,
+        getDriveDestinationPath()
       );
 
-    state.wholeFolderPlan = {
-      tree,
-      sourceFolderId:
-        sourceFolder.id,
-      destinationFolderId,
-      destinationPath:
-        getDriveDestinationPath(),
-      duplicateCount,
-    };
+    const duplicateCount =
+      state.wholeFolderPlan.duplicateCount;
 
     renderWholeFolderPreview();
 
@@ -2012,8 +1729,7 @@ async function handlePreviewWholeFolder() {
  * This avoids forcing the user to scan the source folder again.
  */
 async function refreshWholeFolderPlanForDestination() {
-  const plan =
-    state.wholeFolderPlan;
+  const plan = state.wholeFolderPlan;
 
   if (
     !plan ||
@@ -2023,13 +1739,13 @@ async function refreshWholeFolderPlanForDestination() {
     return;
   }
 
-  const accessToken =
-    googleAuth.getAccessToken();
-
   const destinationFolderId =
     getDriveDestinationFolderId();
 
-  if (!accessToken || !destinationFolderId) {
+  if (
+    !googleAuth.getAccessToken() ||
+    !destinationFolderId
+  ) {
     return;
   }
 
@@ -2038,20 +1754,15 @@ async function refreshWholeFolderPlanForDestination() {
   renderWholeFolderPreview();
 
   try {
-    const duplicateCount =
-      await countWholeFolderDuplicates(
-        accessToken,
-        plan.tree,
-        destinationFolderId
+    state.wholeFolderPlan =
+      await importPlanner.refreshWholeFolderPlan(
+        plan,
+        destinationFolderId,
+        getDriveDestinationPath()
       );
 
-    state.wholeFolderPlan = {
-      ...plan,
-      destinationFolderId,
-      destinationPath:
-        getDriveDestinationPath(),
-      duplicateCount,
-    };
+    const duplicateCount =
+      state.wholeFolderPlan.duplicateCount;
 
     renderWholeFolderPreview();
 
@@ -2156,200 +1867,6 @@ function renderWholeFolderPreview() {
 }
 
 /**
- * Return an existing matching child folder or create it.
- *
- * @param {string} accessToken
- * @param {string} parentFolderId
- * @param {string} name
- * @returns {Promise<object>}
- */
-async function ensureWholeImportFolder(
-  accessToken,
-  parentFolderId,
-  name
-) {
-  const children =
-    await libraryService.listFolders(
-      parentFolderId
-    );
-
-  const existing =
-    findFolderByName(
-      children,
-      name
-    );
-
-  if (existing) {
-    return existing;
-  }
-
-  return libraryService.createFolder(
-    parentFolderId,
-    name
-  );
-}
-
-/**
- * Import one recursive source-tree node into one destination parent.
- *
- * @param {string} accessToken
- * @param {object} node
- * @param {string} destinationParentId
- * @param {"skip"|"replace"|"keep-both"} duplicatePolicy
- * @param {object} counts
- * @returns {Promise<void>}
- */
-async function importWholeFolderNode(
-  accessToken,
-  node,
-  destinationParentId,
-  duplicatePolicy,
-  counts
-) {
-  if (
-    node.bookCount === 0 ||
-    node.cycle
-  ) {
-    return;
-  }
-
-  const destinationFolder =
-    await ensureWholeImportFolder(
-      accessToken,
-      destinationParentId,
-      node.name
-    );
-
-  const destinationFiles =
-    await libraryService.listFiles(
-      destinationFolder.id
-    );
-
-  const existingByName = new Map();
-
-  for (const file of destinationFiles) {
-    const key =
-      normalizeBookName(file.name);
-
-    if (!existingByName.has(key)) {
-      existingByName.set(key, file);
-    }
-  }
-
-  for (const file of node.files) {
-    try {
-      const source =
-        await googleDriveApi.getImportSource(
-          accessToken,
-          file.id
-        );
-
-      if (!source.capabilities?.canCopy) {
-        counts.blocked += 1;
-        continue;
-      }
-
-      const sourceName =
-        source.name || file.name;
-
-      const key =
-        normalizeBookName(sourceName);
-
-      const existing =
-        existingByName.get(key) ||
-        null;
-
-      if (
-        existing &&
-        duplicatePolicy === "skip"
-      ) {
-        counts.skipped += 1;
-        continue;
-      }
-
-      const isReplace =
-        Boolean(existing) &&
-        duplicatePolicy === "replace";
-
-      const isKeepBoth =
-        Boolean(existing) &&
-        duplicatePolicy === "keep-both";
-
-      let driveName = sourceName;
-
-      if (isKeepBoth) {
-        driveName =
-          createAvailableBookName(
-            sourceName,
-            existingByName
-          );
-      }
-
-      const copied =
-        await googleDriveApi.copyBookToFolder(
-          accessToken,
-          file.id,
-          destinationFolder.id,
-          driveName
-        );
-
-      if (isReplace) {
-        try {
-          await googleDriveApi.trashFile(
-            accessToken,
-            existing.id
-          );
-        } catch (replaceError) {
-          try {
-            await googleDriveApi.trashFile(
-              accessToken,
-              copied.id
-            );
-          } catch {
-            // Keep the original replacement error below.
-          }
-
-          throw new Error(
-            "Replacement copy was created, but the old book " +
-              "could not be moved to Trash: " +
-              getErrorMessage(replaceError)
-          );
-        }
-
-        counts.replaced += 1;
-        existingByName.set(
-          key,
-          copied
-        );
-      } else {
-        counts.imported += 1;
-        existingByName.set(
-          normalizeBookName(driveName),
-          copied
-        );
-      }
-    } catch (error) {
-      console.error(
-        "KOCloud recursive import failed:",
-        file,
-        error
-      );
-      counts.failed += 1;
-    }
-  }
-
-  for (const child of node.children) {
-    await importWholeFolderNode(
-      accessToken,
-      child,
-      destinationFolder.id,
-      duplicatePolicy,
-      counts
-    );
-  }
-}
-
-/**
  * Apply the current recursive whole-folder import preview.
  */
 async function handleImportWholeFolder() {
@@ -2362,13 +1879,9 @@ async function handleImportWholeFolder() {
     return;
   }
 
-  const plan =
-    state.wholeFolderPlan;
+  const plan = state.wholeFolderPlan;
 
-  const accessToken =
-    googleAuth.getAccessToken();
-
-  if (!plan || !accessToken) {
+  if (!plan || !googleAuth.getAccessToken()) {
     setMessage(
       elements.driveImportMessage,
       "Preview the whole folder before importing.",
@@ -2394,22 +1907,12 @@ async function handleImportWholeFolder() {
   state.wholeFolderImporting = true;
   updateDriveImportControls();
 
-  const counts = {
-    imported: 0,
-    replaced: 0,
-    skipped: 0,
-    blocked: 0,
-    failed: 0,
-  };
-
   try {
-    await importWholeFolderNode(
-      accessToken,
-      plan.tree,
-      plan.destinationFolderId,
-      state.wholeFolderDuplicatePolicy,
-      counts
-    );
+    const counts =
+      await importExecutor.importWholeFolder(
+        plan,
+        state.wholeFolderDuplicatePolicy
+      );
 
     const resultParts = [];
 
@@ -2454,8 +1957,6 @@ async function handleImportWholeFolder() {
         : "success"
     );
 
-    // Refresh root-level destination choices and current library view. Nested
-    // folders are discovered dynamically by My Books on navigation.
     await loadDriveImportFolders();
     await loadLibrary();
 
@@ -2480,74 +1981,22 @@ async function handleImportWholeFolder() {
  * @returns {Promise<number>} duplicate item count
  */
 async function refreshDriveImportDuplicateStates() {
-  const accessToken = googleAuth.getAccessToken();
   const destinationFolderId =
     getDriveDestinationFolderId();
 
-  if (!accessToken || !destinationFolderId) {
+  if (
+    !googleAuth.getAccessToken() ||
+    !destinationFolderId
+  ) {
     renderDriveSelection();
     return 0;
   }
 
-  const existingBooks =
-    await libraryService.listFiles(
+  const duplicateCount =
+    await importPlanner.refreshSelectionDuplicates(
+      state.driveSelection,
       destinationFolderId
     );
-
-  const existingByName = new Map();
-
-  for (const existingBook of existingBooks) {
-    const key =
-      normalizeBookName(existingBook.name);
-
-    if (!existingByName.has(key)) {
-      existingByName.set(
-        key,
-        existingBook
-      );
-    }
-  }
-
-  const seenSelectionNames = new Set();
-  let duplicateCount = 0;
-
-  for (const book of state.driveSelection) {
-    if (
-      book.importStatus === "done" ||
-      book.importStatus === "replaced"
-    ) {
-      continue;
-    }
-
-    const key = normalizeBookName(book.name);
-    const existingFile =
-      existingByName.get(key) || null;
-
-    const duplicateInSelection =
-      seenSelectionNames.has(key);
-
-    if (existingFile || duplicateInSelection) {
-      book.existingFile = existingFile;
-      book.importStatus = "duplicate";
-      book.importMessage = "";
-
-      if (
-        book.duplicateAction !== "replace" &&
-        book.duplicateAction !== "keep-both"
-      ) {
-        book.duplicateAction = "skip";
-      }
-
-      duplicateCount += 1;
-    } else {
-      book.existingFile = null;
-      book.importStatus = "selected";
-      book.importMessage = "";
-      book.duplicateAction = "skip";
-    }
-
-    seenSelectionNames.add(key);
-  }
 
   renderDriveSelection();
   return duplicateCount;
@@ -2828,11 +2277,13 @@ async function handleImportDriveBooks() {
     return;
   }
 
-  const accessToken = googleAuth.getAccessToken();
   const destinationFolderId =
     getDriveDestinationFolderId();
 
-  if (!accessToken || !destinationFolderId) {
+  if (
+    !googleAuth.getAccessToken() ||
+    !destinationFolderId
+  ) {
     setMessage(
       elements.driveImportMessage,
       "Connect Google Drive and choose a destination first.",
@@ -2841,8 +2292,8 @@ async function handleImportDriveBooks() {
     return;
   }
 
-  const pendingBooks =
-    state.driveSelection.filter(
+  const hasPendingBooks =
+    state.driveSelection.some(
       (book) =>
         book.importStatus !== "done" &&
         book.importStatus !== "replaced" &&
@@ -2850,7 +2301,7 @@ async function handleImportDriveBooks() {
         book.importStatus !== "blocked"
     );
 
-  if (pendingBooks.length === 0) {
+  if (!hasPendingBooks) {
     return;
   }
 
@@ -2858,204 +2309,18 @@ async function handleImportDriveBooks() {
   clearMessage(elements.driveImportMessage);
   updateDriveImportControls();
 
-  let importedCount = 0;
-  let replacedCount = 0;
-  let skippedCount = 0;
-  let blockedCount = 0;
-  let failedCount = 0;
-
   try {
-    // Re-read the destination immediately before import so duplicate
-    // decisions remain correct if KOCloud changed after Picker selection.
-    const existingBooks =
-      await libraryService.listFiles(
-        destinationFolderId
+    const counts =
+      await importExecutor.importSelection(
+        state.driveSelection,
+        destinationFolderId,
+        getDriveDestinationPath(),
+        () => renderDriveSelection()
       );
 
-    const existingByName = new Map();
-
-    for (const existingBook of existingBooks) {
-      const key =
-        normalizeBookName(existingBook.name);
-
-      if (!existingByName.has(key)) {
-        existingByName.set(
-          key,
-          existingBook
-        );
-      }
-    }
-
-    for (const book of pendingBooks) {
-      const normalizedName =
-        normalizeBookName(book.name);
-
-      const cloudExisting =
-        existingByName.get(normalizedName) ||
-        null;
-
-      book.existingFile = cloudExisting;
-
-      if (
-        cloudExisting &&
-        book.duplicateAction === "skip"
-      ) {
-        book.importStatus = "skipped";
-        book.importMessage =
-          "Skipped · already exists";
-        skippedCount += 1;
-        renderDriveSelection();
-        continue;
-      }
-
-      book.importStatus = "checking";
-      book.importMessage = "";
-      renderDriveSelection();
-
-      try {
-        const currentToken =
-          googleAuth.getAccessToken();
-
-        if (!currentToken) {
-          throw new Error(
-            "Google authorization is no longer available."
-          );
-        }
-
-        const source =
-          await googleDriveApi.getImportSource(
-            currentToken,
-            book.id
-          );
-
-        book.name = source.name || book.name;
-        book.mimeType =
-          source.mimeType || book.mimeType;
-
-        if (!source.capabilities?.canCopy) {
-          book.importStatus = "blocked";
-          book.importMessage =
-            "Owner or administrator does not allow copying.";
-          blockedCount += 1;
-          renderDriveSelection();
-          continue;
-        }
-
-        const refreshedName =
-          normalizeBookName(book.name);
-
-        const refreshedExisting =
-          existingByName.get(refreshedName) ||
-          cloudExisting;
-
-        if (
-          refreshedExisting &&
-          book.duplicateAction === "skip"
-        ) {
-          book.importStatus = "skipped";
-          book.importMessage =
-            "Skipped · already exists";
-          skippedCount += 1;
-          renderDriveSelection();
-          continue;
-        }
-
-        const isReplace =
-          Boolean(refreshedExisting) &&
-          book.duplicateAction === "replace";
-
-        const isKeepBoth =
-          Boolean(refreshedExisting) &&
-          book.duplicateAction === "keep-both";
-
-        let driveName = book.name;
-
-        if (isKeepBoth) {
-          driveName = createAvailableBookName(
-            book.name,
-            existingByName
-          );
-        }
-
-        book.importStatus = "importing";
-        book.importMessage =
-          isReplace
-            ? "Copying replacement in Google Drive…"
-            : "Copying directly in Google Drive…";
-        renderDriveSelection();
-
-        const copiedFile =
-          await googleDriveApi.copyBookToFolder(
-            currentToken,
-            book.id,
-            destinationFolderId,
-            driveName
-          );
-
-        if (isReplace) {
-          try {
-            await googleDriveApi.trashFile(
-              currentToken,
-              refreshedExisting.id
-            );
-          } catch (replaceError) {
-            // Best-effort rollback: keep the old book as the live copy if
-            // removing it failed after the new copy was created.
-            try {
-              await googleDriveApi.trashFile(
-                currentToken,
-                copiedFile.id
-              );
-            } catch {
-              // Preserve the original Drive error below. A library refresh
-              // will reveal any remaining duplicate so it can be repaired.
-            }
-
-            throw new Error(
-              "Replacement copy was created, but the old book " +
-                "could not be moved to Trash: " +
-                getErrorMessage(replaceError)
-            );
-          }
-
-          book.importStatus = "replaced";
-          book.importMessage =
-            "Replaced · old copy moved to Trash";
-          book.existingFile = copiedFile;
-          replacedCount += 1;
-
-          existingByName.set(
-            refreshedName,
-            copiedFile
-          );
-        } else {
-          book.importStatus = "done";
-          book.importMessage =
-            driveName === book.name
-              ? `Imported to ${getDriveDestinationPath()}`
-              : `Imported as ${driveName} in ${getDriveDestinationPath()}`;
-          importedCount += 1;
-
-          existingByName.set(
-            normalizeBookName(driveName),
-            copiedFile
-          );
-        }
-      } catch (error) {
-        book.importStatus = "error";
-        book.importMessage =
-          getErrorMessage(error);
-        failedCount += 1;
-      }
-
-      renderDriveSelection();
-    }
-
     if (
-      (
-        importedCount > 0 ||
-        replacedCount > 0
-      ) &&
+      (counts.imported > 0 ||
+        counts.replaced > 0) &&
       getCurrentLibraryFolderId() ===
         destinationFolderId
     ) {
@@ -3064,45 +2329,36 @@ async function handleImportDriveBooks() {
 
     const parts = [];
 
-    if (importedCount > 0) {
+    if (counts.imported > 0) {
+      parts.push(`${counts.imported} imported`);
+    }
+
+    if (counts.replaced > 0) {
+      parts.push(`${counts.replaced} replaced`);
+    }
+
+    if (counts.skipped > 0) {
+      parts.push(`${counts.skipped} skipped`);
+    }
+
+    if (counts.blocked > 0) {
       parts.push(
-        `${importedCount} imported`
+        `${counts.blocked} cannot be copied`
       );
     }
 
-    if (replacedCount > 0) {
-      parts.push(
-        `${replacedCount} replaced`
-      );
+    if (counts.failed > 0) {
+      parts.push(`${counts.failed} failed`);
     }
 
-    if (skippedCount > 0) {
-      parts.push(
-        `${skippedCount} skipped`
-      );
-    }
-
-    if (blockedCount > 0) {
-      parts.push(
-        `${blockedCount} cannot be copied`
-      );
-    }
-
-    if (failedCount > 0) {
-      parts.push(
-        `${failedCount} failed`
-      );
-    }
-
-    const message =
-      parts.length > 0
-        ? `${parts.join(", ")}.`
-        : "No books were imported.";
+    const message = parts.length > 0
+      ? `${parts.join(", ")}.`
+      : "No books were imported.";
 
     setMessage(
       elements.driveImportMessage,
       message,
-      failedCount > 0 ? "error" : "success"
+      counts.failed > 0 ? "error" : "success"
     );
   } catch (error) {
     setMessage(
@@ -4963,65 +4219,6 @@ function setMessage(
  */
 function clearMessage(element) {
   setMessage(element, "");
-}
-
-/**
- * Create a Drive filename that does not collide with existing books.
- *
- * Examples:
- * Dune.epub -> Dune (1).epub -> Dune (2).epub
- *
- * @param {string} originalName
- * @param {Map<string, object>} existingByName
- * @returns {string}
- */
-function createAvailableBookName(
-  originalName,
-  existingByName
-) {
-  const lastDot = originalName.lastIndexOf(".");
-
-  const hasExtension =
-    lastDot > 0 &&
-    lastDot < originalName.length - 1;
-
-  const stem = hasExtension
-    ? originalName.slice(0, lastDot)
-    : originalName;
-
-  const extension = hasExtension
-    ? originalName.slice(lastDot)
-    : "";
-
-  let index = 1;
-
-  while (true) {
-    const candidate =
-      `${stem} (${index})${extension}`;
-
-    if (
-      !existingByName.has(
-        normalizeBookName(candidate)
-      )
-    ) {
-      return candidate;
-    }
-
-    index += 1;
-  }
-}
-
-/**
- * Normalize a filename for duplicate comparison.
- *
- * @param {string} name
- * @returns {string}
- */
-function normalizeBookName(name) {
-  return name
-    .normalize("NFC")
-    .trim()
-    .toLowerCase();
 }
 
 /**
