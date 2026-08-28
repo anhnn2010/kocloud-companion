@@ -2,6 +2,7 @@ import {
   getBookMimeType,
   isSupportedBookName,
 } from "../book-formats.js";
+import { KOCloudProtocol } from "../core/protocol.js";
 
 const DRIVE_FILES_URL =
   "https://www.googleapis.com/drive/v3/files";
@@ -15,9 +16,10 @@ const FOLDER_MIME_TYPE =
 const SHORTCUT_MIME_TYPE =
   "application/vnd.google-apps.shortcut";
 
-const ROLE_KEY = "kocloud_role";
-const SCHEMA_KEY = "kocloud_schema";
-const SCHEMA_VERSION = "1";
+const ROLE_KEY = KOCloudProtocol.metadataKeys.role;
+const SCHEMA_KEY = KOCloudProtocol.metadataKeys.schema;
+const SOURCE_KEY = KOCloudProtocol.metadataKeys.source;
+const SCHEMA_VERSION = KOCloudProtocol.schemaVersion;
 
 /**
  * Escape a value before placing it inside a Google Drive `q` string literal.
@@ -177,12 +179,12 @@ export class GoogleDriveApi {
   async resolveBooksStorage(accessToken) {
     const root = await this.findManagedFolder(
       accessToken,
-      "root"
+      KOCloudProtocol.roles.root
     );
 
     const books = await this.findManagedFolder(
       accessToken,
-      "books",
+      KOCloudProtocol.roles.books,
       root.id
     );
 
@@ -296,8 +298,9 @@ export class GoogleDriveApi {
       mimeType: FOLDER_MIME_TYPE,
       parents: [parentFolderId],
       appProperties: {
-        [ROLE_KEY]: "book_folder",
+        [ROLE_KEY]: KOCloudProtocol.roles.bookFolder,
         [SCHEMA_KEY]: SCHEMA_VERSION,
+        [SOURCE_KEY]: KOCloudProtocol.sources.webCompanion,
       },
     };
 
@@ -445,9 +448,9 @@ export class GoogleDriveApi {
 
     const appProperties = {
       ...existingAppProperties,
-      [ROLE_KEY]: "book",
+      [ROLE_KEY]: KOCloudProtocol.roles.book,
       [SCHEMA_KEY]: SCHEMA_VERSION,
-      kocloud_source: "manual_drive",
+      [SOURCE_KEY]: KOCloudProtocol.sources.manualDrive,
     };
 
     const response = await fetch(
@@ -547,9 +550,9 @@ export class GoogleDriveApi {
       name: driveName,
       parents: [destinationFolderId],
       appProperties: {
-        [ROLE_KEY]: "book",
+        [ROLE_KEY]: KOCloudProtocol.roles.book,
         [SCHEMA_KEY]: SCHEMA_VERSION,
-        kocloud_source: "drive_import",
+        [SOURCE_KEY]: KOCloudProtocol.sources.driveImport,
       },
     };
 
@@ -641,9 +644,9 @@ export class GoogleDriveApi {
       name: driveName,
       parents: [booksFolderId],
       appProperties: {
-        [ROLE_KEY]: "book",
+        [ROLE_KEY]: KOCloudProtocol.roles.book,
         [SCHEMA_KEY]: SCHEMA_VERSION,
-        kocloud_source: "web_companion",
+        [SOURCE_KEY]: KOCloudProtocol.sources.webCompanion,
       },
     };
 

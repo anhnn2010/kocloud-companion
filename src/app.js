@@ -11,6 +11,7 @@ import {
   createAvailableBookName,
   normalizeBookName,
 } from "./core/book-names.js";
+import { KOCloudProtocol } from "./core/protocol.js";
 import {
   BrowserUploadTask,
   UploadCancelledError,
@@ -2496,7 +2497,8 @@ async function handleRegisterFolderBooks() {
           source.appProperties || {};
 
         if (
-          appProperties.kocloud_role === "book"
+          appProperties[KOCloudProtocol.metadataKeys.role] ===
+            KOCloudProtocol.roles.book
         ) {
           alreadyRegistered += 1;
           continue;
@@ -2658,7 +2660,8 @@ async function handleRegisterAllFolderBooks() {
           source.appProperties || {};
 
         if (
-          appProperties.kocloud_role === "book"
+          appProperties[KOCloudProtocol.metadataKeys.role] ===
+            KOCloudProtocol.roles.book
         ) {
           alreadyRegistered += 1;
           continue;

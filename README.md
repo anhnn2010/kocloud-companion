@@ -82,3 +82,9 @@ The `.nojekyll` file prevents unnecessary Jekyll processing.
 V0.1 uploads one EPUB/PDF at a time. Multi-file queueing, retry, duplicate
 handling, and library management are planned after this checkpoint is verified
 end-to-end.
+
+## Storage protocol
+
+KOCloud Companion and `kocloud.koplugin` use **KOCloud Storage Protocol v1**.
+The portable contract is documented in
+[`docs/storage-protocol-v1.md`](docs/storage-protocol-v1.md).
