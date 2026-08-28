@@ -1,0 +1,11 @@
+{
+  "name": "kocloud-companion",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check:syntax": "node scripts/check-syntax.mjs",
+    "test": "node --test tests/**/*.test.js",
+    "check": "npm run check:syntax && npm run check:imports && npm test",
+    "check:imports": "node scripts/check-imports.mjs"
+  }
+}

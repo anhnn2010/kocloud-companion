@@ -88,3 +88,13 @@ end-to-end.
 KOCloud Companion and `kocloud.koplugin` use **KOCloud Storage Protocol v1**.
 The portable contract is documented in
 [`docs/storage-protocol-v1.md`](docs/storage-protocol-v1.md).
+
+## Development checks
+
+Run the zero-dependency validation suite before pushing changes:
+
+```sh
+npm run check
+```
+
+See [`docs/testing.md`](docs/testing.md) for the test/CI structure.
