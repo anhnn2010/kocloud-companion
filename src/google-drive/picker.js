@@ -10,7 +10,7 @@ const PICKER_SCRIPT_URL =
 let pickerLibraryPromise = null;
 
 /**
- * Google Picker helper for importing books already stored in Google Drive.
+ * Google Picker helper for importing files already stored in Google Drive.
  */
 export class GoogleDrivePicker {
   /**
@@ -137,7 +137,7 @@ export class GoogleDrivePicker {
   }
 
   /**
-   * Open Google Picker for selecting KOReader-supported books.
+   * Open Google Picker for selecting files from the chosen source folder.
    *
    * The view intentionally does not set ownedByMe, so both user-owned and
    * shared-with-user files can be shown.
@@ -155,7 +155,7 @@ export class GoogleDrivePicker {
     accessToken,
     {
       parentId = "",
-      title = "Select KOReader books",
+      title = "Select files",
     } = {}
   ) {
     if (!accessToken) {

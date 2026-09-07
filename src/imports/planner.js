@@ -1,6 +1,9 @@
 import {
   normalizeBookName,
 } from "../core/book-names.js";
+import {
+  createConcurrencyLimiter,
+} from "../core/concurrency.js";
 
 /**
  * Plan KOCloud library imports without performing remote mutations.
@@ -31,7 +34,7 @@ export class ImportPlanner {
   }
 
   /**
-   * Recompute destination/selection duplicates for selected books.
+   * Recompute destination/selection duplicates for selected files.
    *
    * @param {Array<object>} selection
    * @param {string} destinationFolderId
@@ -113,12 +116,31 @@ export class ImportPlanner {
     tree,
     sourceFolderId,
     destinationFolderId,
-    destinationPath
+    destinationPath,
+    options = {}
   ) {
+    const progress = {
+      checkedFolders: 0,
+      totalFolders: tree.folderCount || 1,
+      currentPath: "",
+    };
+
+    const limiter =
+      options.limiter ||
+      createConcurrencyLimiter(
+        options.maxConcurrency || 4
+      );
+
     const duplicateCount =
       await this.#countWholeFolderDuplicates(
         tree,
-        destinationFolderId
+        destinationFolderId,
+        {
+          ...options,
+          progress,
+          path: [],
+          limiter,
+        }
       );
 
     return {
@@ -141,13 +163,15 @@ export class ImportPlanner {
   async refreshWholeFolderPlan(
     plan,
     destinationFolderId,
-    destinationPath
+    destinationPath,
+    options = {}
   ) {
     return this.createWholeFolderPlan(
       plan.tree,
       plan.sourceFolderId,
       destinationFolderId,
-      destinationPath
+      destinationPath,
+      options
     );
   }
 
@@ -158,28 +182,36 @@ export class ImportPlanner {
    */
   async #countWholeFolderDuplicates(
     node,
-    destinationParentId
+    destinationParentId,
+    options = {}
   ) {
     this.#clearDuplicateMarks(node);
+    throwIfAborted(options.signal);
 
-    const destinationChildren =
-      await this.library.listFolders(
-        destinationParentId
+    const destinationEntries =
+      await options.limiter.run(() =>
+        this.#listEntries(destinationParentId)
       );
+
+    throwIfAborted(options.signal);
 
     const destinationFolder =
       this.#findFolderByName(
-        destinationChildren,
+        destinationEntries.folders,
         node.name
       );
 
     if (!destinationFolder) {
-      return this.#markInternalDuplicates(node);
+      return this.#markInternalDuplicates(
+        node,
+        options
+      );
     }
 
     return this.#markAgainstDestination(
       node,
-      destinationFolder.id
+      destinationFolder.id,
+      options
     );
   }
 
@@ -216,9 +248,13 @@ export class ImportPlanner {
    * @param {object} node
    * @returns {number}
    */
-  #markInternalDuplicates(node) {
+  #markInternalDuplicates(node, options = {}) {
+    throwIfAborted(options.signal);
+
     let duplicateCount = 0;
     const names = new Set();
+
+    this.#reportDuplicateProgress(node, options);
 
     for (const file of node.files) {
       const key = normalizeBookName(file.name);
@@ -233,7 +269,10 @@ export class ImportPlanner {
 
     for (const child of node.children) {
       duplicateCount +=
-        this.#markInternalDuplicates(child);
+        this.#markInternalDuplicates(
+          child,
+          this.#childOptions(options, node)
+        );
     }
 
     return duplicateCount;
@@ -246,22 +285,28 @@ export class ImportPlanner {
    */
   async #markAgainstDestination(
     node,
-    destinationFolderId
+    destinationFolderId,
+    options = {}
   ) {
-    let duplicateCount = 0;
+    throwIfAborted(options.signal);
 
-    const destinationFiles =
-      await this.library.listFiles(
-        destinationFolderId
+    const destinationEntries =
+      await options.limiter.run(() =>
+        this.#listEntries(destinationFolderId)
       );
 
+    throwIfAborted(options.signal);
+
+    this.#reportDuplicateProgress(node, options);
+
     const destinationNames = new Set(
-      destinationFiles.map((file) =>
+      destinationEntries.files.map((file) =>
         normalizeBookName(file.name)
       )
     );
 
     const sourceNames = new Set();
+    let duplicateCount = 0;
 
     for (const file of node.files) {
       const key = normalizeBookName(file.name);
@@ -278,30 +323,105 @@ export class ImportPlanner {
       sourceNames.add(key);
     }
 
-    const destinationChildren =
-      await this.library.listFolders(
-        destinationFolderId
-      );
-
-    for (const child of node.children) {
-      const destinationChild =
-        this.#findFolderByName(
-          destinationChildren,
-          child.name
-        );
-
-      if (destinationChild) {
-        duplicateCount +=
-          await this.#markAgainstDestination(
-            child,
-            destinationChild.id
+    const childCounts = await Promise.all(
+      node.children.map(async (child) => {
+        const destinationChild =
+          this.#findFolderByName(
+            destinationEntries.folders,
+            child.name
           );
-      } else {
-        duplicateCount +=
-          this.#markInternalDuplicates(child);
-      }
+
+        if (destinationChild) {
+          return this.#markAgainstDestination(
+            child,
+            destinationChild.id,
+            this.#childOptions(options, node)
+          );
+        }
+
+        return this.#markInternalDuplicates(
+          child,
+          this.#childOptions(options, node)
+        );
+      })
+    );
+
+    return childCounts.reduce(
+      (total, count) => total + count,
+      duplicateCount
+    );
+  }
+
+  /**
+   * List direct destination entries in one provider call when supported.
+   *
+   * @param {string} folderId
+   * @returns {Promise<{folders: Array<object>, files: Array<object>}>}
+   */
+  async #listEntries(folderId) {
+    if (typeof this.library.listEntries === "function") {
+      return this.library.listEntries(folderId);
     }
 
-    return duplicateCount;
+    const [folders, files] = await Promise.all([
+      this.library.listFolders(folderId),
+      this.library.listFiles(folderId),
+    ]);
+
+    return { folders, files };
   }
+
+  /**
+   * Advance duplicate-analysis progress for one source-tree node.
+   *
+   * @param {object} node
+   * @param {object} options
+   */
+  #reportDuplicateProgress(node, options) {
+    const progress = options.progress;
+
+    if (!progress) {
+      return;
+    }
+
+    progress.checkedFolders += 1;
+    progress.currentPath = [
+      ...(options.path || []),
+      node.name || "Folder",
+    ].join(" / ");
+
+    options.onProgress?.({ ...progress });
+  }
+
+  /**
+   * Build recursion options while preserving shared progress/cancellation.
+   *
+   * @param {object} options
+   * @param {object} node
+   * @returns {object}
+   */
+  #childOptions(options, node) {
+    return {
+      ...options,
+      path: [
+        ...(options.path || []),
+        node.name || "Folder",
+      ],
+    };
+  }
+
+}
+
+
+/**
+ * @param {AbortSignal|null|undefined} signal
+ */
+function throwIfAborted(signal) {
+  if (!signal?.aborted) {
+    return;
+  }
+
+  const error = new Error("Scan cancelled.");
+  error.name = "AbortError";
+  throw error;
 }

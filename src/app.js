@@ -20,6 +20,13 @@ import {
   getBookFormatLabel,
   SUPPORTED_BOOK_ACCEPT,
 } from "./book-formats.js";
+import {
+  getLocalDirectoryKey,
+  getLocalUploadPath,
+} from "./uploads/local-path.js";
+import {
+  UploadDestinationResolver,
+} from "./uploads/destination-resolver.js";
 
 const libraryService = new LibraryService({
   driveApi: googleDriveApi,
@@ -78,6 +85,10 @@ const elements = {
     document.getElementById("whole-folder-summary"),
   wholeFolderTarget:
     document.getElementById("whole-folder-target"),
+  wholeFolderScanProgress:
+    document.getElementById("whole-folder-scan-progress"),
+  wholeFolderScanProgressText:
+    document.getElementById("whole-folder-scan-progress-text"),
   wholeFolderDuplicatePolicy:
     document.getElementById("whole-folder-duplicate-policy"),
   importWholeFolder:
@@ -114,6 +125,7 @@ const elements = {
   uploadDestinationMessage:
     document.getElementById("upload-destination-message"),
   bookFiles: document.getElementById("book-files"),
+  bookFolder: document.getElementById("book-folder"),
   queueEmpty: document.getElementById("queue-empty"),
   uploadQueue: document.getElementById("upload-queue"),
   queueSummary: document.getElementById("queue-summary"),
@@ -160,6 +172,8 @@ const state = {
   driveSourceBrowserPath: [],
   driveSourceBrowserLoading: false,
   wholeFolderScanning: false,
+  wholeFolderScanController: null,
+  wholeFolderScanProgress: null,
   wholeFolderImporting: false,
   wholeFolderPlan: null,
   wholeFolderDuplicatePolicy: "skip",
@@ -179,6 +193,9 @@ const state = {
 function init() {
   elements.clientId.value = googleAuth.getClientId();
   elements.bookFiles.accept = SUPPORTED_BOOK_ACCEPT;
+  // Folder uploads preserve every file. Readable-book recognition remains
+  // informational and the KOReader plugin filters what it can open.
+  elements.bookFolder.removeAttribute("accept");
 
   const pickerConfig = googleDrivePicker.getConfig();
   elements.pickerApiKey.value = pickerConfig.apiKey;
@@ -223,7 +240,12 @@ function init() {
 
   elements.bookFiles.addEventListener(
     "change",
-    handleBookSelection
+    () => handleBookSelection(elements.bookFiles)
+  );
+
+  elements.bookFolder.addEventListener(
+    "change",
+    () => handleBookSelection(elements.bookFolder)
   );
 
   elements.clearQueue.addEventListener(
@@ -293,7 +315,7 @@ function init() {
 
   elements.clearWholeFolderPreview.addEventListener(
     "click",
-    clearWholeFolderPlan
+    handleWholeFolderPreviewAction
   );
 
   elements.wholeFolderDuplicatePolicy.addEventListener(
@@ -1503,7 +1525,7 @@ function renderDriveSourceBrowser() {
 }
 
 /**
- * Open Google Picker and preview selected Drive books.
+ * Open Google Picker and preview selected Drive files.
  */
 async function handleOpenDrivePicker() {
   if (
@@ -1523,7 +1545,7 @@ async function handleOpenDrivePicker() {
   if (!accessToken) {
     setMessage(
       elements.driveImportMessage,
-      "Connect Google Drive before selecting books.",
+      "Connect Google Drive before selecting files.",
       "error"
     );
     return;
@@ -1541,7 +1563,7 @@ async function handleOpenDrivePicker() {
   if (!sourceFolder?.id) {
     setMessage(
       elements.driveImportMessage,
-      "Choose a source folder before selecting books.",
+      "Choose a source folder before selecting files.",
       "error"
     );
     return;
@@ -1558,7 +1580,7 @@ async function handleOpenDrivePicker() {
         {
           parentId: sourceFolder.id,
           title:
-            `Select books from ${sourceFolder.name}`,
+            `Select files from ${sourceFolder.name}`,
         }
       );
 
@@ -1566,29 +1588,18 @@ async function handleOpenDrivePicker() {
       return;
     }
 
-    const supportedBooks =
-      selectedBooks.filter((book) =>
-        libraryService.isSupportedBook(book)
-      );
-
-    const unsupportedCount =
-      selectedBooks.length -
-      supportedBooks.length;
-
-    if (supportedBooks.length === 0) {
-      setMessage(
-        elements.driveImportMessage,
-        "No supported KOReader book formats were selected.",
-        "error"
-      );
-      return;
-    }
+    const recognizedBooks =
+      selectedBooks.filter((file) =>
+        libraryService.isSupportedBook(file)
+      ).length;
 
     clearWholeFolderPlan();
 
+    // Import from Drive is intentionally permissive: preserve every selected
+    // file and let the KOReader plugin decide which formats are readable.
     state.driveSelection =
       importPlanner.createSelection(
-        supportedBooks
+        selectedBooks
       );
 
     const duplicateCount =
@@ -1603,12 +1614,10 @@ async function handleOpenDrivePicker() {
 
     setMessage(
       elements.driveImportMessage,
-      `${supportedBooks.length} Drive book` +
-        `${supportedBooks.length === 1 ? "" : "s"} selected.` +
-        (unsupportedCount > 0
-          ? ` ${unsupportedCount} unsupported file` +
-            `${unsupportedCount === 1 ? " was" : "s were"} skipped.`
-          : "") +
+      `${selectedBooks.length} Drive file` +
+        `${selectedBooks.length === 1 ? "" : "s"} selected` +
+        ` · ${recognizedBooks} recognized book` +
+        `${recognizedBooks === 1 ? "" : "s"}.` +
         duplicateText,
       "success"
     );
@@ -1620,14 +1629,16 @@ async function handleOpenDrivePicker() {
     );
   } finally {
     elements.openDrivePicker.textContent =
-      "Select books";
+      "Select files";
 
     updateDriveImportControls();
   }
 }
 
 /**
- * Build a read-only recursive import preview.
+ * Build a read-only recursive import preview with live progress and
+ * cancellation. Source traversal and destination duplicate analysis are shown
+ * as separate phases because either can take noticeable time on a large tree.
  */
 async function handlePreviewWholeFolder() {
   if (
@@ -1664,32 +1675,81 @@ async function handlePreviewWholeFolder() {
   state.driveSelection = [];
   renderDriveSelection();
 
+  const controller = new AbortController();
+  state.wholeFolderScanController = controller;
   state.wholeFolderScanning = true;
   state.wholeFolderPlan = null;
+  state.wholeFolderScanProgress = {
+    phase: "source",
+    foldersScanned: 0,
+    filesScanned: 0,
+    booksFound: 0,
+    currentPath: sourceFolder.name || "Source folder",
+    startedAt: Date.now(),
+  };
   renderWholeFolderPreview();
   updateDriveImportControls();
 
   try {
-    const tree =
-      await driveImportSource.scanTree(
-        sourceFolder
-      );
+    const tree = await driveImportSource.scanTree(
+      sourceFolder,
+      new Set(),
+      {
+        signal: controller.signal,
+        onProgress(progress) {
+          state.wholeFolderScanProgress = {
+            phase: "source",
+            ...progress,
+            startedAt:
+              state.wholeFolderScanProgress?.startedAt ||
+              Date.now(),
+          };
+          renderWholeFolderPreview();
+        },
+      }
+    );
 
-    if (tree.bookCount === 0) {
+    if (tree.fileCount === 0) {
       setMessage(
         elements.driveImportMessage,
-        `No supported books were found in ${sourceFolder.name} or its subfolders.`,
+        `No files were found in ${sourceFolder.name} or its subfolders.`,
         "success"
       );
       return;
     }
+
+    state.wholeFolderScanProgress = {
+      phase: "duplicates",
+      checkedFolders: 0,
+      totalFolders: tree.folderCount,
+      currentPath: tree.name,
+      foldersScanned: tree.folderCount,
+      booksFound: tree.bookCount,
+      startedAt: Date.now(),
+    };
+    renderWholeFolderPreview();
 
     state.wholeFolderPlan =
       await importPlanner.createWholeFolderPlan(
         tree,
         sourceFolder.id,
         destinationFolderId,
-        getDriveDestinationPath()
+        getDriveDestinationPath(),
+        {
+          signal: controller.signal,
+          onProgress(progress) {
+            state.wholeFolderScanProgress = {
+              phase: "duplicates",
+              ...progress,
+              foldersScanned: tree.folderCount,
+              booksFound: tree.bookCount,
+              startedAt:
+                state.wholeFolderScanProgress?.startedAt ||
+                Date.now(),
+            };
+            renderWholeFolderPreview();
+          },
+        }
       );
 
     const duplicateCount =
@@ -1699,7 +1759,9 @@ async function handlePreviewWholeFolder() {
 
     setMessage(
       elements.driveImportMessage,
-      `Whole-folder preview ready: ${tree.bookCount} book` +
+      `Whole-folder preview ready: ${tree.fileCount} file` +
+        `${tree.fileCount === 1 ? "" : "s"}, ` +
+        `${tree.bookCount} recognized book` +
         `${tree.bookCount === 1 ? "" : "s"}, ` +
         `${tree.folderCount} folder` +
         `${tree.folderCount === 1 ? "" : "s"}, ` +
@@ -1709,15 +1771,24 @@ async function handlePreviewWholeFolder() {
     );
   } catch (error) {
     state.wholeFolderPlan = null;
-    renderWholeFolderPreview();
 
-    setMessage(
-      elements.driveImportMessage,
-      `Could not scan whole source folder: ${getErrorMessage(error)}`,
-      "error"
-    );
+    if (error?.name === "AbortError") {
+      setMessage(
+        elements.driveImportMessage,
+        "Folder scan cancelled. No files were changed.",
+        ""
+      );
+    } else {
+      setMessage(
+        elements.driveImportMessage,
+        `Could not scan whole source folder: ${getErrorMessage(error)}`,
+        "error"
+      );
+    }
   } finally {
+    state.wholeFolderScanController = null;
     state.wholeFolderScanning = false;
+    state.wholeFolderScanProgress = null;
     renderWholeFolderPreview();
     updateDriveImportControls();
   }
@@ -1750,26 +1821,56 @@ async function refreshWholeFolderPlanForDestination() {
     return;
   }
 
+  const controller = new AbortController();
+  state.wholeFolderScanController = controller;
   state.wholeFolderScanning = true;
+  state.wholeFolderScanProgress = {
+    phase: "duplicates",
+    checkedFolders: 0,
+    totalFolders: plan.tree.folderCount,
+    currentPath: plan.tree.name,
+    foldersScanned: plan.tree.folderCount,
+    booksFound: plan.tree.bookCount,
+    startedAt: Date.now(),
+  };
   updateDriveImportControls();
   renderWholeFolderPreview();
 
   try {
-    state.wholeFolderPlan =
+    const refreshedPlan =
       await importPlanner.refreshWholeFolderPlan(
         plan,
         destinationFolderId,
-        getDriveDestinationPath()
+        getDriveDestinationPath(),
+        {
+          signal: controller.signal,
+          onProgress(progress) {
+            state.wholeFolderScanProgress = {
+              phase: "duplicates",
+              ...progress,
+              foldersScanned: plan.tree.folderCount,
+              booksFound: plan.tree.bookCount,
+              startedAt:
+                state.wholeFolderScanProgress?.startedAt ||
+                Date.now(),
+            };
+            renderWholeFolderPreview();
+          },
+        }
       );
 
+    state.wholeFolderPlan = refreshedPlan;
+
     const duplicateCount =
-      state.wholeFolderPlan.duplicateCount;
+      refreshedPlan.duplicateCount;
 
     renderWholeFolderPreview();
 
     setMessage(
       elements.driveImportMessage,
-      `Destination updated: ${plan.tree.bookCount} book` +
+      `Destination updated: ${plan.tree.fileCount} file` +
+        `${plan.tree.fileCount === 1 ? "" : "s"}, ` +
+        `${plan.tree.bookCount} recognized book` +
         `${plan.tree.bookCount === 1 ? "" : "s"}, ` +
         `${plan.tree.folderCount} folder` +
         `${plan.tree.folderCount === 1 ? "" : "s"}, ` +
@@ -1778,27 +1879,57 @@ async function refreshWholeFolderPlanForDestination() {
       "success"
     );
   } catch (error) {
-    setMessage(
-      elements.driveImportMessage,
-      `Could not refresh destination preview: ${getErrorMessage(error)}`,
-      "error"
-    );
+    // The destination selector already changed. Do not leave a plan pointing
+    // at the previous destination after a cancelled/failed refresh.
+    state.wholeFolderPlan = null;
+
+    if (error?.name === "AbortError") {
+      setMessage(
+        elements.driveImportMessage,
+        "Destination check cancelled. Preview the folder again before importing.",
+        ""
+      );
+    } else {
+      setMessage(
+        elements.driveImportMessage,
+        `Could not refresh destination preview: ${getErrorMessage(error)}`,
+        "error"
+      );
+    }
   } finally {
+    state.wholeFolderScanController = null;
     state.wholeFolderScanning = false;
+    state.wholeFolderScanProgress = null;
     renderWholeFolderPreview();
     updateDriveImportControls();
   }
 }
 
 /**
+ * Cancel an active scan, otherwise clear the existing recursive preview.
+ */
+function handleWholeFolderPreviewAction() {
+  if (state.wholeFolderScanning) {
+    state.wholeFolderScanController?.abort();
+    return;
+  }
+
+  clearWholeFolderPlan();
+}
+
+/**
  * Clear the recursive import preview.
  */
 function clearWholeFolderPlan() {
-  if (state.wholeFolderImporting) {
+  if (
+    state.wholeFolderImporting ||
+    state.wholeFolderScanning
+  ) {
     return;
   }
 
   state.wholeFolderPlan = null;
+  state.wholeFolderScanProgress = null;
   renderWholeFolderPreview();
   updateDriveImportControls();
 }
@@ -1823,25 +1954,119 @@ function handleWholeFolderDuplicatePolicyChange() {
 }
 
 /**
- * Render recursive whole-folder preview state.
+ * Format elapsed scan time for a compact live status.
+ *
+ * @param {number|undefined} startedAt
+ * @returns {string}
+ */
+function formatScanElapsed(startedAt) {
+  if (!startedAt) {
+    return "";
+  }
+
+  const totalSeconds = Math.max(
+    0,
+    Math.floor((Date.now() - startedAt) / 1000)
+  );
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  if (minutes === 0) {
+    return `${seconds}s`;
+  }
+
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+}
+
+/**
+ * Estimate observed source-scan throughput without inventing an ETA.
+ *
+ * @param {number} booksFound
+ * @param {number|undefined} startedAt
+ * @returns {string}
+ */
+function formatScanRate(booksFound, startedAt) {
+  if (!startedAt || booksFound <= 0) {
+    return "";
+  }
+
+  const elapsedMs = Date.now() - startedAt;
+
+  if (elapsedMs < 3000) {
+    return "";
+  }
+
+  const booksPerMinute = Math.round(
+    booksFound / (elapsedMs / 60000)
+  );
+
+  return `${booksPerMinute} books/min`;
+}
+
+/**
+ * Render recursive whole-folder preview and live scan progress.
  */
 function renderWholeFolderPreview() {
-  const plan =
-    state.wholeFolderPlan;
+  const plan = state.wholeFolderPlan;
+  const progress =
+    state.wholeFolderScanProgress;
 
   elements.wholeFolderPreview.hidden =
-    !plan &&
+    !plan && !state.wholeFolderScanning;
+
+  elements.wholeFolderScanProgress.parentElement.hidden =
     !state.wholeFolderScanning;
 
-  if (state.wholeFolderScanning) {
-    elements.wholeFolderSummary.textContent =
-      "Scanning whole folder…";
+  elements.clearWholeFolderPreview.textContent =
+    state.wholeFolderScanning
+      ? "Cancel"
+      : "Clear";
 
-    elements.wholeFolderTarget.textContent =
-      "Reading source folders and checking destination duplicates.";
+  if (state.wholeFolderScanning && progress) {
+    if (progress.phase === "duplicates") {
+      const checked =
+        progress.checkedFolders || 0;
+      const total =
+        progress.totalFolders || 1;
+
+      elements.wholeFolderSummary.textContent =
+        "Checking destination duplicates…";
+      elements.wholeFolderTarget.textContent =
+        `Current: ${progress.currentPath || "…"}`;
+
+      elements.wholeFolderScanProgress.max = total;
+      elements.wholeFolderScanProgress.value = checked;
+      const elapsed = formatScanElapsed(progress.startedAt);
+      elements.wholeFolderScanProgressText.textContent =
+        `${checked} / ${total} folders` +
+        (elapsed ? ` · ${elapsed}` : "");
+    } else {
+      elements.wholeFolderSummary.textContent =
+        "Scanning source folder…";
+      elements.wholeFolderTarget.textContent =
+        `Current: ${progress.currentPath || "…"}`;
+
+      elements.wholeFolderScanProgress.removeAttribute(
+        "value"
+      );
+      const elapsed = formatScanElapsed(progress.startedAt);
+      const rate = formatScanRate(
+        progress.booksFound || 0,
+        progress.startedAt
+      );
+      elements.wholeFolderScanProgressText.textContent =
+        `${progress.foldersScanned || 0} folders · ` +
+        `${progress.filesScanned || 0} files · ` +
+        `${progress.booksFound || 0} books` +
+        (rate ? ` · ${rate}` : "") +
+        (elapsed ? ` · ${elapsed}` : "");
+    }
 
     return;
   }
+
+  elements.wholeFolderScanProgress.value = 0;
+  elements.wholeFolderScanProgressText.textContent = "";
 
   if (!plan) {
     elements.wholeFolderSummary.textContent =
@@ -1853,7 +2078,9 @@ function renderWholeFolderPreview() {
   const tree = plan.tree;
 
   elements.wholeFolderSummary.textContent =
-    `${tree.bookCount} book` +
+    `${tree.fileCount} file` +
+    `${tree.fileCount === 1 ? "" : "s"} · ` +
+    `${tree.bookCount} recognized book` +
     `${tree.bookCount === 1 ? "" : "s"} · ` +
     `${tree.folderCount} folder` +
     `${tree.folderCount === 1 ? "" : "s"} · ` +
@@ -2053,6 +2280,9 @@ function handleClearDriveSelection() {
  */
 function renderDriveSelection() {
   const books = state.driveSelection;
+  const recognizedBooks = books.filter((file) =>
+    libraryService.isSupportedBook(file)
+  ).length;
 
   elements.driveSelectionEmpty.hidden =
     books.length > 0;
@@ -2061,8 +2291,10 @@ function renderDriveSelection() {
     books.length === 0;
 
   elements.driveSelectionSummary.textContent =
-    `${books.length} book` +
-    `${books.length === 1 ? "" : "s"} selected`;
+    `${books.length} file` +
+    `${books.length === 1 ? "" : "s"} selected` +
+    ` · ${recognizedBooks} recognized book` +
+    `${recognizedBooks === 1 ? "" : "s"}`;
 
   elements.driveSelectionList.replaceChildren();
 
@@ -2230,11 +2462,13 @@ function updateDriveImportControls() {
       : "Confirm import";
 
   elements.wholeFolderDuplicatePolicy.disabled =
+    state.wholeFolderScanning ||
     state.wholeFolderImporting;
 
   elements.clearWholeFolderPreview.disabled =
     state.wholeFolderImporting ||
-    !state.wholeFolderPlan;
+    (!state.wholeFolderScanning &&
+      !state.wholeFolderPlan);
 
   elements.clearDriveSelection.disabled =
     !ready ||
@@ -2246,7 +2480,7 @@ function updateDriveImportControls() {
   elements.importDriveBooks.textContent =
     state.driveImporting
       ? "Importing…"
-      : "Import selected books";
+      : "Import selected files";
 
   const destinationReady =
     !state.busy &&
@@ -2354,7 +2588,7 @@ async function handleImportDriveBooks() {
 
     const message = parts.length > 0
       ? `${parts.join(", ")}.`
-      : "No books were imported.";
+      : "No files were imported.";
 
     setMessage(
       elements.driveImportMessage,
@@ -3204,40 +3438,47 @@ function updateLibraryControls() {
 }
 
 /**
- * Add supported selected files to the upload queue and preflight duplicates.
+ * Add selected local files/folders to the upload queue and preflight
+ * duplicates. Individual selection accepts recognized books; folder selection
+ * preserves every file via File.webkitRelativePath.
+ *
+ * @param {HTMLInputElement} input
  */
-async function handleBookSelection() {
+async function handleBookSelection(input) {
   clearMessage(elements.uploadMessage);
 
-  const files = Array.from(
-    elements.bookFiles.files || []
-  );
+  const files = Array.from(input.files || []);
 
   if (files.length === 0) {
     return;
   }
 
-  const supported = [];
+  const isFolderSelection =
+    input === elements.bookFolder;
+  const accepted = [];
   const rejected = [];
 
   for (const file of files) {
-    if (libraryService.isSupportedBook(file)) {
-      supported.push(file);
+    if (
+      isFolderSelection ||
+      libraryService.isSupportedBook(file)
+    ) {
+      accepted.push(file);
     } else {
       rejected.push(file.name);
     }
   }
 
-  for (const file of supported) {
+  for (const file of accepted) {
     state.queue.push(createQueueItem(file));
   }
 
-  // Reset so the same local file can be selected again intentionally.
-  elements.bookFiles.value = "";
+  // Reset so the same local file/folder can be selected again intentionally.
+  input.value = "";
 
   renderQueue();
 
-  if (supported.length > 0) {
+  if (accepted.length > 0) {
     try {
       await refreshDuplicateStates();
     } catch (error) {
@@ -3254,14 +3495,19 @@ async function handleBookSelection() {
       elements.uploadMessage,
       `${rejected.length} unsupported file` +
         `${rejected.length === 1 ? " was" : "s were"} skipped. ` +
-        "Only KOReader-supported book formats are accepted.",
+        "Individual uploads accept KOReader-supported book formats only.",
       "error"
     );
   }
 }
 
 /**
- * Compare queued files with files in the selected upload destination.
+ * Compare queued files with their actual target folders.
+ *
+ * Ordinary file selections target the chosen destination directly. Folder
+ * selections target destination/relative/path, but preflight never creates
+ * missing Drive folders; a missing path simply cannot contain a cloud
+ * duplicate yet.
  */
 async function refreshDuplicateStates() {
   const accessToken = googleAuth.getAccessToken();
@@ -3272,20 +3518,10 @@ async function refreshDuplicateStates() {
     return;
   }
 
-  const existingBooks =
-    await libraryService.listFiles(
-      destinationFolderId
-    );
-
-  const existingByName = new Map();
-
-  for (const book of existingBooks) {
-    const key = normalizeBookName(book.name);
-
-    if (!existingByName.has(key)) {
-      existingByName.set(key, book);
-    }
-  }
+  const resolver =
+    new UploadDestinationResolver(libraryService);
+  const filesByFolderId = new Map();
+  const seenLocalNamesByDirectory = new Map();
 
   for (const item of state.queue) {
     if (
@@ -3296,11 +3532,58 @@ async function refreshDuplicateStates() {
       continue;
     }
 
-    const existing = existingByName.get(
-      normalizeBookName(item.file.name)
+    const directoryKey =
+      getLocalDirectoryKey(item.directoryParts);
+    let seenNames =
+      seenLocalNamesByDirectory.get(directoryKey);
+
+    if (!seenNames) {
+      seenNames = new Set();
+      seenLocalNamesByDirectory.set(
+        directoryKey,
+        seenNames
+      );
+    }
+
+    const nameKey =
+      normalizeBookName(item.file.name);
+    const duplicateInSelection =
+      seenNames.has(nameKey);
+
+    seenNames.add(nameKey);
+
+    const targetFolder = await resolver.resolve(
+      destinationFolderId,
+      item.directoryParts,
+      { createMissing: false }
     );
 
-    if (existing) {
+    let existing = null;
+
+    if (targetFolder) {
+      let existingByName =
+        filesByFolderId.get(targetFolder.id);
+
+      if (!existingByName) {
+        const existingBooks =
+          await libraryService.listFiles(
+            targetFolder.id
+          );
+
+        existingByName = buildBookNameMap(
+          existingBooks
+        );
+        filesByFolderId.set(
+          targetFolder.id,
+          existingByName
+        );
+      }
+
+      existing =
+        existingByName.get(nameKey) || null;
+    }
+
+    if (existing || duplicateInSelection) {
       item.existingFile = existing;
       item.status = "duplicate";
       item.progress = 0;
@@ -3329,6 +3612,24 @@ async function refreshDuplicateStates() {
   }
 
   renderQueue();
+}
+
+/**
+ * @param {Array<object>} books
+ * @returns {Map<string, object>}
+ */
+function buildBookNameMap(books) {
+  const map = new Map();
+
+  for (const book of books) {
+    const key = normalizeBookName(book.name);
+
+    if (!map.has(key)) {
+      map.set(key, book);
+    }
+  }
+
+  return map;
 }
 
 /**
@@ -3370,6 +3671,10 @@ function handleClearQueue() {
 
 /**
  * Upload/replace waiting items sequentially.
+ *
+ * Folder-upload items resolve/create their relative directory immediately
+ * before the file is processed. Existing-file maps are kept per target
+ * folder, so duplicate actions remain correct for nested trees.
  */
 async function handleUploadAll() {
   if (state.busy) {
@@ -3392,7 +3697,7 @@ async function handleUploadAll() {
   if (!destinationFolderId) {
     setMessage(
       elements.uploadMessage,
-      "Choose a destination before uploading books.",
+      "Choose a destination before uploading files.",
       "error"
     );
     return;
@@ -3408,7 +3713,7 @@ async function handleUploadAll() {
   if (pendingItems.length === 0) {
     setMessage(
       elements.uploadMessage,
-      "There are no books waiting to upload."
+      "There are no files waiting to upload."
     );
     return;
   }
@@ -3430,51 +3735,12 @@ async function handleUploadAll() {
   let skipped = 0;
   let failed = 0;
 
+  const resolver =
+    new UploadDestinationResolver(libraryService);
+  const existingByFolderId = new Map();
+
   try {
-    // Re-read Drive immediately before the batch to avoid stale duplicate
-    // decisions if the cloud changed after file selection.
-    const existingBooks =
-      await libraryService.listFiles(
-        destinationFolderId
-      );
-
-    const existingByName = new Map();
-
-    for (const book of existingBooks) {
-      const key = normalizeBookName(book.name);
-
-      if (!existingByName.has(key)) {
-        existingByName.set(key, book);
-      }
-    }
-
     for (const item of pendingItems) {
-      const normalizedName =
-        normalizeBookName(item.file.name);
-
-      const cloudExisting =
-        existingByName.get(normalizedName) || null;
-
-      if (cloudExisting) {
-        item.existingFile = cloudExisting;
-
-        if (item.duplicateAction === "skip") {
-          item.status = "skipped";
-          item.progress = 100;
-          item.error = "";
-          skipped += 1;
-
-          renderQueue();
-          updateBatchProgress();
-          continue;
-        }
-      } else if (item.status === "duplicate") {
-        // The previously detected duplicate disappeared before upload.
-        item.existingFile = null;
-        item.duplicateAction = "skip";
-        item.status = "waiting";
-      }
-
       const currentToken = googleAuth.getAccessToken();
 
       if (!currentToken) {
@@ -3485,6 +3751,82 @@ async function handleUploadAll() {
         renderQueue();
         updateBatchProgress();
         continue;
+      }
+
+      let targetFolder;
+
+      try {
+        targetFolder = await resolver.resolve(
+          destinationFolderId,
+          item.directoryParts,
+          { createMissing: true }
+        );
+      } catch (error) {
+        item.status = "error";
+        item.error =
+          `Could not prepare destination folders: ${getErrorMessage(error)}`;
+        failed += 1;
+        renderQueue();
+        updateBatchProgress();
+        continue;
+      }
+
+      if (!targetFolder?.id) {
+        item.status = "error";
+        item.error = "Could not resolve the upload destination folder.";
+        failed += 1;
+        renderQueue();
+        updateBatchProgress();
+        continue;
+      }
+
+      let existingByName =
+        existingByFolderId.get(targetFolder.id);
+
+      if (!existingByName) {
+        const existingBooks =
+          await libraryService.listFiles(
+            targetFolder.id
+          );
+
+        existingByName = buildBookNameMap(
+          existingBooks
+        );
+        existingByFolderId.set(
+          targetFolder.id,
+          existingByName
+        );
+      }
+
+      const normalizedName =
+        normalizeBookName(item.file.name);
+      const cloudExisting =
+        existingByName.get(normalizedName) || null;
+
+      item.existingFile = cloudExisting;
+
+      if (
+        cloudExisting &&
+        item.duplicateAction === "skip"
+      ) {
+        item.status = "skipped";
+        item.progress = 100;
+        item.error = "";
+        skipped += 1;
+
+        renderQueue();
+        updateBatchProgress();
+        continue;
+      }
+
+      // If preflight marked an in-queue duplicate, the first copy may now be
+      // present in this map. Re-evaluate against current batch state here.
+      if (
+        !cloudExisting &&
+        item.status === "duplicate" &&
+        item.duplicateAction === "skip"
+      ) {
+        item.status = "waiting";
       }
 
       item.status = "uploading";
@@ -3523,8 +3865,14 @@ async function handleUploadAll() {
           sessionUrl =
             await libraryService.createUploadSession(
               item.file,
-              destinationFolderId,
-              driveName
+              targetFolder.id,
+              driveName,
+              {
+                isBook:
+                  libraryService.isSupportedBook(
+                    item.file
+                  ),
+              }
             );
         }
 
@@ -3647,11 +3995,18 @@ async function handleUploadAll() {
  * @returns {object}
  */
 function createQueueItem(file) {
+  const {
+    relativePath,
+    directoryParts,
+  } = getLocalUploadPath(file);
+
   return {
     id:
       globalThis.crypto?.randomUUID?.() ||
       `${Date.now()}-${Math.random()}`,
     file,
+    relativePath,
+    directoryParts,
     status: "waiting",
     progress: 0,
     error: "",
@@ -3659,6 +4014,8 @@ function createQueueItem(file) {
     existingFile: null,
     duplicateAction: "skip",
     driveName: file.name,
+    recognizedBook:
+      libraryService.isSupportedBook(file),
   };
 }
 
@@ -3671,8 +4028,14 @@ function renderQueue() {
   elements.queueEmpty.hidden = count > 0;
   elements.uploadQueue.hidden = count === 0;
 
+  const recognizedBooks = state.queue.filter(
+    (item) => item.recognizedBook
+  ).length;
+
   elements.queueSummary.textContent =
-    `${count} book${count === 1 ? "" : "s"} selected`;
+    `${count} file${count === 1 ? "" : "s"} selected` +
+    ` · ${recognizedBooks} recognized book` +
+    `${recognizedBooks === 1 ? "" : "s"}`;
 
   elements.queueList.replaceChildren();
 
@@ -3704,7 +4067,7 @@ function createQueueItemElement(item) {
 
   const name = document.createElement("div");
   name.className = "queue-item-name";
-  name.textContent = item.file.name;
+  name.textContent = item.relativePath || item.file.name;
 
   const size = document.createElement("div");
   size.className = "queue-item-size";
@@ -4028,20 +4391,7 @@ function handleAuthEvent(event) {
  * Enable the file picker when Google Drive storage is ready.
  */
 function enableBookSelection() {
-  elements.bookFiles.disabled = false;
-
-  const pickerLabel =
-    document.querySelector(
-      'label[for="book-files"]'
-    );
-
-  if (pickerLabel) {
-    pickerLabel.setAttribute(
-      "aria-disabled",
-      "false"
-    );
-  }
-
+  setLocalBookPickersDisabled(false);
   updateControls();
 }
 
@@ -4049,18 +4399,31 @@ function enableBookSelection() {
  * Disable upload controls until Google Drive is ready.
  */
 function disableBookSelection() {
-  elements.bookFiles.disabled = true;
+  setLocalBookPickersDisabled(true);
   elements.uploadAll.disabled = true;
+}
 
-  const pickerLabel =
-    document.querySelector(
-      'label[for="book-files"]'
-    );
+/**
+ * Keep file and folder pickers enabled/disabled together.
+ *
+ * @param {boolean} disabled
+ */
+function setLocalBookPickersDisabled(disabled) {
+  elements.bookFiles.disabled = disabled;
+  elements.bookFolder.disabled = disabled;
 
-  if (pickerLabel) {
-    pickerLabel.setAttribute(
+  for (const inputId of [
+    "book-files",
+    "book-folder",
+  ]) {
+    const pickerLabel =
+      document.querySelector(
+        `label[for="${inputId}"]`
+      );
+
+    pickerLabel?.setAttribute(
       "aria-disabled",
-      "true"
+      disabled ? "true" : "false"
     );
   }
 }
@@ -4069,6 +4432,10 @@ function disableBookSelection() {
  * Reset auth-related UI to disconnected state.
  */
 function setDisconnectedState() {
+  state.wholeFolderScanController?.abort();
+  state.wholeFolderScanController = null;
+  state.wholeFolderScanning = false;
+  state.wholeFolderScanProgress = null;
   state.driveSourceFolder = null;
   state.driveSourceFolderPicking = false;
   state.driveSourceBrowserFolders = [];
@@ -4116,12 +4483,12 @@ function setBusy(busy) {
   elements.clearQueue.disabled = busy;
 
   if (busy) {
-    elements.bookFiles.disabled = true;
+    setLocalBookPickersDisabled(true);
   } else if (
     googleAuth.isConnected() &&
     state.storage?.books?.id
   ) {
-    elements.bookFiles.disabled = false;
+    setLocalBookPickersDisabled(false);
   }
 
   updateControls();

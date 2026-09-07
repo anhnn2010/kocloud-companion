@@ -1,3 +1,7 @@
+import {
+  createConcurrencyLimiter,
+} from "../../core/concurrency.js";
+
 /**
  * Google Drive import-source adapter.
  *
@@ -35,17 +39,52 @@ export class GoogleDriveImportSource {
   }
 
   /**
-   * List supported book files directly under one Drive folder.
+   * List all direct non-folder files under one Drive folder.
+   *
+   * @param {string} folderId
+   * @returns {Promise<Array<object>>}
+   */
+  async listFiles(folderId) {
+    return this.driveApi.listBooksInFolder(
+      this.#requireAccessToken(),
+      folderId
+    );
+  }
+
+
+  /**
+   * List direct folders and files with one Drive traversal when available.
+   *
+   * @param {string} folderId
+   * @returns {Promise<{folders: Array<object>, files: Array<object>}>}
+   */
+  async listEntries(folderId) {
+    if (
+      typeof this.driveApi.listFolderEntries ===
+      "function"
+    ) {
+      return this.driveApi.listFolderEntries(
+        this.#requireAccessToken(),
+        folderId
+      );
+    }
+
+    const [files, folders] = await Promise.all([
+      this.listFiles(folderId),
+      this.listFolders(folderId),
+    ]);
+
+    return { folders, files };
+  }
+
+  /**
+   * List recognized KOReader book files directly under one Drive folder.
    *
    * @param {string} folderId
    * @returns {Promise<Array<object>>}
    */
   async listBooks(folderId) {
-    const files =
-      await this.driveApi.listBooksInFolder(
-        this.#requireAccessToken(),
-        folderId
-      );
+    const files = await this.listFiles(folderId);
 
     return files.filter((file) =>
       this.isSupportedBook(file)
@@ -82,7 +121,12 @@ export class GoogleDriveImportSource {
       this.#requireAccessToken(),
       fileId,
       destinationFolderId,
-      driveName
+      driveName,
+      {
+        isBook: this.isSupportedBook({
+          name: driveName,
+        }),
+      }
     );
   }
 
@@ -102,15 +146,48 @@ export class GoogleDriveImportSource {
   /**
    * Recursively scan a source folder into a provider-neutral tree.
    *
+   * The callback reports monotonic counts as folders are discovered. The
+   * overall folder count is intentionally unknown until traversal completes,
+   * so the UI can show meaningful activity without inventing a percentage.
+   *
    * @param {{id: string, name: string}} folder
    * @param {Set<string>} ancestorIds
+   * @param {{
+   *   signal?: AbortSignal,
+   *   onProgress?: (progress: object) => void,
+   *   path?: Array<string>,
+   *   progress?: object
+   * }} options
    * @returns {Promise<object>}
    */
   async scanTree(
     folder,
-    ancestorIds = new Set()
+    ancestorIds = new Set(),
+    options = {}
   ) {
+    const signal = options.signal || null;
+    const onProgress =
+      options.onProgress || (() => {});
+    const path = options.path || [];
+    const progress = options.progress || {
+      foldersScanned: 0,
+      filesScanned: 0,
+      booksFound: 0,
+      currentPath: "",
+    };
+    const limiter =
+      options.limiter ||
+      createConcurrencyLimiter(
+        options.maxConcurrency || 4
+      );
+
+    throwIfAborted(signal);
+
     const currentId = folder.id;
+    const currentPath = [
+      ...path,
+      folder.name || "Folder",
+    ];
 
     if (ancestorIds.has(currentId)) {
       return {
@@ -119,6 +196,7 @@ export class GoogleDriveImportSource {
         files: [],
         children: [],
         folderCount: 1,
+        fileCount: 0,
         bookCount: 0,
         isShortcut: Boolean(folder.isShortcut),
         cycle: true,
@@ -130,22 +208,47 @@ export class GoogleDriveImportSource {
 
     nextAncestorIds.add(currentId);
 
-    const [files, childFolders] =
-      await Promise.all([
-        this.listBooks(currentId),
-        this.listFolders(currentId),
-      ]);
+    const { files: allFiles, folders: childFolders } =
+      await limiter.run(async () => {
+        throwIfAborted(signal);
+        const entries =
+          await this.listEntries(currentId);
+        throwIfAborted(signal);
+        return entries;
+      });
 
-    const children = [];
+    const recognizedBooks = allFiles.filter((file) =>
+      this.isSupportedBook(file)
+    );
 
-    for (const childFolder of childFolders) {
-      children.push(
-        await this.scanTree(
+    // Preserve every non-folder file in the recursive import tree. Extension
+    // recognition is informational only; the KOReader plugin decides which
+    // files are readable when browsing the library.
+    const files = allFiles;
+
+    progress.foldersScanned += 1;
+    progress.filesScanned += allFiles.length;
+    progress.booksFound += recognizedBooks.length;
+    progress.currentPath = currentPath.join(" / ");
+
+    onProgress({ ...progress });
+
+    const children = await Promise.all(
+      childFolders.map((childFolder) =>
+        this.scanTree(
           childFolder,
-          nextAncestorIds
+          nextAncestorIds,
+          {
+            ...options,
+            signal,
+            onProgress,
+            path: currentPath,
+            progress,
+            limiter,
+          }
         )
-      );
-    }
+      )
+    );
 
     const folderCount =
       1 +
@@ -155,8 +258,16 @@ export class GoogleDriveImportSource {
         0
       );
 
-    const bookCount =
+    const fileCount =
       files.length +
+      children.reduce(
+        (total, child) =>
+          total + (child.fileCount || 0),
+        0
+      );
+
+    const bookCount =
+      recognizedBooks.length +
       children.reduce(
         (total, child) =>
           total + child.bookCount,
@@ -169,6 +280,7 @@ export class GoogleDriveImportSource {
       files,
       children,
       folderCount,
+      fileCount,
       bookCount,
       isShortcut: Boolean(folder.isShortcut),
       cycle: false,
@@ -192,4 +304,20 @@ export class GoogleDriveImportSource {
 
     return accessToken;
   }
+}
+
+
+/**
+ * Throw a conventional AbortError when a caller cancels a recursive scan.
+ *
+ * @param {AbortSignal|null} signal
+ */
+function throwIfAborted(signal) {
+  if (!signal?.aborted) {
+    return;
+  }
+
+  const error = new Error("Scan cancelled.");
+  error.name = "AbortError";
+  throw error;
 }

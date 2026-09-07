@@ -222,7 +222,13 @@ export class ImportExecutor {
     duplicatePolicy,
     counts
   ) {
-    if (node.bookCount === 0 || node.cycle) {
+    const totalFiles =
+      node.fileCount ??
+      node.bookCount ??
+      node.files?.length ??
+      0;
+
+    if (totalFiles === 0 || node.cycle) {
       return;
     }
 

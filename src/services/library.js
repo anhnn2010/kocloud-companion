@@ -55,6 +55,34 @@ export class LibraryService {
     );
   }
 
+
+  /**
+   * List direct folders and files in one request when the provider supports it.
+   * Falls back to the older two-call interface for test doubles/providers that
+   * have not implemented the combined operation yet.
+   *
+   * @param {string} folderId
+   * @returns {Promise<{folders: Array<object>, files: Array<object>}>}
+   */
+  async listEntries(folderId) {
+    if (
+      typeof this.driveApi.listFolderEntries ===
+      "function"
+    ) {
+      return this.driveApi.listFolderEntries(
+        this.#requireAccessToken(),
+        folderId
+      );
+    }
+
+    const [folders, files] = await Promise.all([
+      this.listFolders(folderId),
+      this.listFiles(folderId),
+    ]);
+
+    return { folders, files };
+  }
+
   /**
    * List KOCloud-managed books in one folder.
    *
@@ -129,13 +157,15 @@ export class LibraryService {
   async createUploadSession(
     file,
     destinationFolderId,
-    driveName = file.name
+    driveName = file.name,
+    { isBook = true } = {}
   ) {
     return this.driveApi.createBookUploadSession(
       this.#requireAccessToken(),
       file,
       destinationFolderId,
-      driveName
+      driveName,
+      { isBook }
     );
   }
 

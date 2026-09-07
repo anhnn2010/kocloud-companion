@@ -99,3 +99,50 @@ test("selection executor replaces by trashing old copy", async () => {
   assert.deepEqual(trashed, ["old"]);
   assert.equal(selection[0].importStatus, "replaced");
 });
+
+
+test("whole-folder executor imports non-book files preserved by the scan", async () => {
+  const copies = [];
+  const executor = new ImportExecutor({
+    source: {
+      async getFile(id) {
+        return {
+          id,
+          name: "cover.jpg",
+          capabilities: { canCopy: true },
+        };
+      },
+      async copyFile(id, folderId, name) {
+        copies.push({ id, folderId, name });
+        return { id: "copy-cover", name };
+      },
+      async trashFile() {},
+    },
+    libraryService: {
+      async listFiles() { return []; },
+      async listFolders() { return []; },
+      async createFolder(parentId, name) {
+        return { id: `${parentId}/${name}`, name };
+      },
+    },
+  });
+
+  const counts = await executor.importWholeFolder(
+    {
+      tree: {
+        name: "Book Folder",
+        fileCount: 1,
+        bookCount: 0,
+        files: [{ id: "cover", name: "cover.jpg" }],
+        children: [],
+        cycle: false,
+      },
+      destinationFolderId: "destination",
+    },
+    "skip"
+  );
+
+  assert.equal(counts.imported, 1);
+  assert.equal(copies.length, 1);
+  assert.equal(copies[0].name, "cover.jpg");
+});

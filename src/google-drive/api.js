@@ -80,7 +80,7 @@ export class GoogleDriveApi {
       const params = new URLSearchParams({
         q: query,
         spaces: "drive",
-        pageSize: "100",
+        pageSize: "1000",
         fields:
           "nextPageToken," +
           "files(" +
@@ -192,6 +192,79 @@ export class GoogleDriveApi {
       root,
       books,
     };
+  }
+
+
+  /**
+   * List all direct children of one Drive folder in a single traversal.
+   *
+   * Recursive import uses this instead of issuing separate files/folders
+   * queries for every directory. Folder shortcuts are normalized to their
+   * target folder IDs while ordinary files are returned unchanged.
+   *
+   * @param {string} accessToken
+   * @param {string} parentFolderId
+   * @returns {Promise<{folders: Array<object>, files: Array<object>}>}
+   */
+  async listFolderEntries(
+    accessToken,
+    parentFolderId
+  ) {
+    const parentId =
+      escapeQueryValue(parentFolderId);
+
+    const query =
+      `'${parentId}' in parents ` +
+      "and trashed=false";
+
+    const items = await this.listFiles(
+      accessToken,
+      query
+    );
+
+    const folders = [];
+    const files = [];
+
+    for (const item of items) {
+      if (item.mimeType === FOLDER_MIME_TYPE) {
+        folders.push({
+          ...item,
+          isShortcut: false,
+        });
+        continue;
+      }
+
+      if (
+        item.mimeType === SHORTCUT_MIME_TYPE &&
+        item.shortcutDetails?.targetMimeType ===
+          FOLDER_MIME_TYPE &&
+        item.shortcutDetails?.targetId
+      ) {
+        folders.push({
+          ...item,
+          sourceShortcutId: item.id,
+          id: item.shortcutDetails.targetId,
+          mimeType: FOLDER_MIME_TYPE,
+          isShortcut: true,
+        });
+        continue;
+      }
+
+      files.push(item);
+    }
+
+    folders.sort((left, right) =>
+      left.name.localeCompare(
+        right.name,
+        undefined,
+        {
+          sensitivity: "base",
+          numeric: true,
+        }
+      )
+    );
+
+    return { folders, files };
   }
 
   /**
@@ -534,7 +607,8 @@ export class GoogleDriveApi {
     accessToken,
     sourceFileId,
     destinationFolderId,
-    driveName
+    driveName,
+    { isBook = true } = {}
   ) {
     const safeFileId =
       encodeURIComponent(sourceFileId);
@@ -546,14 +620,20 @@ export class GoogleDriveApi {
         "size,modifiedTime",
     });
 
+    const appProperties = {
+      [SCHEMA_KEY]: SCHEMA_VERSION,
+      [SOURCE_KEY]: KOCloudProtocol.sources.driveImport,
+    };
+
+    if (isBook) {
+      appProperties[ROLE_KEY] =
+        KOCloudProtocol.roles.book;
+    }
+
     const metadata = {
       name: driveName,
       parents: [destinationFolderId],
-      appProperties: {
-        [ROLE_KEY]: KOCloudProtocol.roles.book,
-        [SCHEMA_KEY]: SCHEMA_VERSION,
-        [SOURCE_KEY]: KOCloudProtocol.sources.driveImport,
-      },
+      appProperties,
     };
 
     const response = await fetch(
@@ -572,7 +652,7 @@ export class GoogleDriveApi {
     if (!response.ok) {
       await throwDriveError(
         response,
-        "Copy book into KOCloud"
+        "Copy file into KOCloud"
       );
     }
 
@@ -624,7 +704,7 @@ export class GoogleDriveApi {
   }
 
   /**
-   * Create a resumable upload session for one KOCloud book.
+   * Create a resumable upload session for one KOCloud library file.
    *
    * The browser will PUT ebook bytes directly to the returned session URL.
    *
@@ -638,16 +718,23 @@ export class GoogleDriveApi {
     accessToken,
     file,
     booksFolderId,
-    driveName = file.name
+    driveName = file.name,
+    { isBook = true } = {}
   ) {
+    const appProperties = {
+      [SCHEMA_KEY]: SCHEMA_VERSION,
+      [SOURCE_KEY]: KOCloudProtocol.sources.webCompanion,
+    };
+
+    if (isBook) {
+      appProperties[ROLE_KEY] =
+        KOCloudProtocol.roles.book;
+    }
+
     const metadata = {
       name: driveName,
       parents: [booksFolderId],
-      appProperties: {
-        [ROLE_KEY]: KOCloudProtocol.roles.book,
-        [SCHEMA_KEY]: SCHEMA_VERSION,
-        [SOURCE_KEY]: KOCloudProtocol.sources.webCompanion,
-      },
+      appProperties,
     };
 
     const fields =
@@ -774,7 +861,7 @@ export class GoogleDriveApi {
   }
 
   /**
-   * Return whether the file is supported by Companion.
+   * Return whether the file is a recognized KOReader book format.
    *
    * @param {{name: string}} file
    * @returns {boolean}

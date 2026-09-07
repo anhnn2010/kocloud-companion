@@ -92,9 +92,8 @@
       <h2 id="upload-title">Add books</h2>
 
       <p class="help-text">
-        Choose a destination, then select one or more KOReader-supported
-        book files. KOCloud uploads them one at a time directly from this
-        browser.
+        Choose a destination, then select individual KOReader book files or
+        an entire folder. Folder uploads preserve every file and subfolder.
       </p>
 
       <label for="upload-destination">
@@ -136,9 +135,15 @@
         aria-live="polite"
       ></p>
 
-      <label class="file-picker" for="book-files">
-        Choose book files
-      </label>
+      <div class="local-upload-pickers">
+        <label class="file-picker" for="book-files">
+          Choose book files
+        </label>
+
+        <label class="file-picker" for="book-folder">
+          Choose a folder
+        </label>
+      </div>
 
       <input
         id="book-files"
@@ -148,6 +153,21 @@
         multiple
         disabled
       >
+
+      <input
+        id="book-folder"
+        class="visually-hidden"
+        type="file"
+        webkitdirectory
+        directory
+        multiple
+        disabled
+      >
+
+      <p class="help-text">
+        Folder uploads preserve the selected folder, all subfolders, and every
+        file. My Books on KOReader only shows formats the plugin can read.
+      </p>
 
       <div id="queue-empty" class="queue-empty">
         No books selected.
@@ -196,7 +216,7 @@
 
       <p class="help-text">
         Choose the source and destination first, then choose how you want to
-        import the books.
+        import the files.
       </p>
 
       <label>Source folder</label>
@@ -323,7 +343,7 @@
         class="secondary-button full-width"
         disabled
       >
-        Select books
+        Select files
       </button>
 
       <button
@@ -336,8 +356,8 @@
       </button>
 
       <p class="help-text">
-        Select individual books, or import the whole source folder recursively
-        while preserving its folder structure.
+        Select individual files, or import the whole source folder recursively
+        while preserving every file and its folder structure.
       </p>
 
       <div
@@ -364,6 +384,18 @@
           class="help-text"
         ></p>
 
+        <div
+          class="progress-region whole-folder-scan-progress"
+          hidden
+        >
+          <progress
+            id="whole-folder-scan-progress"
+            max="1"
+            value="0"
+          ></progress>
+          <span id="whole-folder-scan-progress-text"></span>
+        </div>
+
         <label for="whole-folder-duplicate-policy">
           Duplicate files
         </label>
@@ -384,9 +416,9 @@
         </select>
 
         <p class="help-text">
-          Existing folders with the same name are reused.
-          The summary covers the recursive source tree; only supported
-          KOReader book formats are imported.
+          Existing folders with the same name are reused. The recursive import
+          preserves every non-folder file; recognized book formats are shown
+          separately for information.
         </p>
 
         <button
@@ -400,13 +432,13 @@
       </div>
 
       <div id="drive-selection-empty" class="queue-empty">
-        No Drive books selected.
+        No Drive files selected.
       </div>
 
       <div id="drive-selection" class="upload-queue" hidden>
         <div class="queue-header">
           <strong id="drive-selection-summary">
-            0 books selected
+            0 files selected
           </strong>
 
           <button
@@ -427,7 +459,7 @@
             class="primary-button full-width"
             disabled
           >
-            Import selected books
+            Import selected files
           </button>
         </div>
       </div>

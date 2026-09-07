@@ -63,3 +63,109 @@ test("whole-folder planner preserves destination context", async () => {
   assert.equal(plan.destinationFolderId, "destination");
   assert.equal(plan.duplicateCount, 1);
 });
+
+test("whole-folder planner reports duplicate-analysis progress", async () => {
+  const planner = new ImportPlanner({
+    libraryService: {
+      async listFolders(parentId) {
+        if (parentId === "destination") {
+          return [{ id: "source-dest", name: "Source" }];
+        }
+        return [];
+      },
+      async listFiles() {
+        return [];
+      },
+    },
+  });
+  const tree = {
+    name: "Source",
+    folderCount: 2,
+    files: [],
+    children: [
+      {
+        name: "Child",
+        folderCount: 1,
+        files: [],
+        children: [],
+      },
+    ],
+  };
+  const updates = [];
+
+  await planner.createWholeFolderPlan(
+    tree,
+    "source",
+    "destination",
+    "KOCloud/Books",
+    {
+      onProgress(progress) {
+        updates.push(progress);
+      },
+    }
+  );
+
+  assert.equal(updates.at(-1).checkedFolders, 2);
+  assert.equal(updates.at(-1).totalFolders, 2);
+  assert.equal(
+    updates.at(-1).currentPath,
+    "Source / Child"
+  );
+});
+
+test("whole-folder duplicate analysis bounds concurrent destination scans", async () => {
+  const sourceChildren = [1, 2, 3, 4, 5, 6].map((number) => ({
+    name: `Child ${number}`,
+    files: [],
+    children: [],
+  }));
+  const tree = {
+    name: "Source",
+    folderCount: 7,
+    files: [],
+    children: sourceChildren,
+  };
+  let active = 0;
+  let maxActive = 0;
+
+  const planner = new ImportPlanner({
+    libraryService: {
+      async listEntries(folderId) {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        active -= 1;
+
+        if (folderId === "destination") {
+          return {
+            folders: [{ id: "source-dest", name: "Source" }],
+            files: [],
+          };
+        }
+
+        if (folderId === "source-dest") {
+          return {
+            folders: sourceChildren.map((child, index) => ({
+              id: `dest-child-${index + 1}`,
+              name: child.name,
+            })),
+            files: [],
+          };
+        }
+
+        return { folders: [], files: [] };
+      },
+    },
+  });
+
+  const plan = await planner.createWholeFolderPlan(
+    tree,
+    "source",
+    "destination",
+    "KOCloud/Books",
+    { maxConcurrency: 4 }
+  );
+
+  assert.equal(plan.duplicateCount, 0);
+  assert.equal(maxActive, 4);
+});

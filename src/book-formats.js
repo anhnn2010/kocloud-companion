@@ -114,5 +114,5 @@ export function getBookFormatLabel(name) {
     getBookExtension(name)
   );
 
-  return format?.label || "Book";
+  return format?.label || "File";
 }
