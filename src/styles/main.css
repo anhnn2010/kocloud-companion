@@ -509,15 +509,19 @@ progress {
 }
 
 .whole-folder-scan-progress {
+  grid-template-columns: minmax(0, 1fr);
   margin: 12px 14px 14px;
 }
 
 #whole-folder-scan-progress-text {
-  min-width: max-content;
+  min-width: 0;
   color: var(--muted);
   font-size: 0.85rem;
   font-variant-numeric: tabular-nums;
-  text-align: right;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  text-align: left;
+  white-space: normal;
 }
 @media (max-width: 420px) {
   .local-upload-pickers {

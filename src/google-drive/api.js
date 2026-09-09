@@ -21,6 +21,91 @@ const SCHEMA_KEY = KOCloudProtocol.metadataKeys.schema;
 const SOURCE_KEY = KOCloudProtocol.metadataKeys.source;
 const SCHEMA_VERSION = KOCloudProtocol.schemaVersion;
 
+const DEFAULT_DRIVE_TIMEOUT_MS = 60_000;
+const COPY_DRIVE_TIMEOUT_MS = 120_000;
+const SAFE_RETRY_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+const CREATE_RETRY_STATUSES = new Set([429]);
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function retryDelayMs(attempt) {
+  return Math.min(500 * (2 ** attempt), 4_000);
+}
+
+/**
+ * Fetch Drive with a hard timeout and an operation-specific retry policy.
+ *
+ * Read/idempotent operations may retry transient network/server failures.
+ * Resource-creating operations must opt into a narrower policy because a
+ * timed-out POST may already have completed server-side.
+ */
+async function fetchDrive(
+  url,
+  options = {},
+  {
+    timeoutMs = DEFAULT_DRIVE_TIMEOUT_MS,
+    maxRetries = 0,
+    retryStatuses = new Set(),
+    retryNetworkErrors = false,
+  } = {}
+) {
+  let attempt = 0;
+
+  while (true) {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
+
+      if (
+        !response.ok &&
+        retryStatuses.has(response.status) &&
+        attempt < maxRetries
+      ) {
+        clearTimeout(timeoutId);
+        await sleep(retryDelayMs(attempt));
+        attempt += 1;
+        continue;
+      }
+
+      return response;
+    } catch (error) {
+      clearTimeout(timeoutId);
+
+      if (
+        retryNetworkErrors &&
+        attempt < maxRetries
+      ) {
+        await sleep(retryDelayMs(attempt));
+        attempt += 1;
+        continue;
+      }
+
+      if (timedOut) {
+        const timeoutError = new Error(
+          `Google Drive request timed out after ${Math.round(timeoutMs / 1000)}s.`
+        );
+        timeoutError.name = "TimeoutError";
+        throw timeoutError;
+      }
+
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
 /**
  * Escape a value before placing it inside a Google Drive `q` string literal.
  *
@@ -94,12 +179,17 @@ export class GoogleDriveApi {
         params.set("pageToken", pageToken);
       }
 
-      const response = await fetch(
+      const response = await fetchDrive(
         `${DRIVE_FILES_URL}?${params}`,
         {
           headers: {
             Authorization: `Bearer ${accessToken}`,
           },
+        },
+        {
+          maxRetries: 3,
+          retryStatuses: SAFE_RETRY_STATUSES,
+          retryNetworkErrors: true,
         }
       );
 
@@ -378,7 +468,7 @@ export class GoogleDriveApi {
       },
     };
 
-    const response = await fetch(
+    const response = await fetchDrive(
       `${DRIVE_FILES_URL}?${params}`,
       {
         method: "POST",
@@ -388,6 +478,10 @@ export class GoogleDriveApi {
             "application/json; charset=UTF-8",
         },
         body: JSON.stringify(metadata),
+      },
+      {
+        maxRetries: 2,
+        retryStatuses: CREATE_RETRY_STATUSES,
       }
     );
 
@@ -477,12 +571,17 @@ export class GoogleDriveApi {
         "capabilities(canEdit)",
     });
 
-    const response = await fetch(
+    const response = await fetchDrive(
       `${DRIVE_FILES_URL}/${safeFileId}?${params}`,
       {
         headers: {
           Authorization: `Bearer ${accessToken}`,
         },
+      },
+      {
+        maxRetries: 3,
+        retryStatuses: SAFE_RETRY_STATUSES,
+        retryNetworkErrors: true,
       }
     );
 
@@ -527,7 +626,7 @@ export class GoogleDriveApi {
       [SOURCE_KEY]: KOCloudProtocol.sources.manualDrive,
     };
 
-    const response = await fetch(
+    const response = await fetchDrive(
       `${DRIVE_FILES_URL}/${safeFileId}?${params}`,
       {
         method: "PATCH",
@@ -539,6 +638,11 @@ export class GoogleDriveApi {
         body: JSON.stringify({
           appProperties,
         }),
+      },
+      {
+        maxRetries: 3,
+        retryStatuses: SAFE_RETRY_STATUSES,
+        retryNetworkErrors: true,
       }
     );
 
@@ -573,12 +677,17 @@ export class GoogleDriveApi {
         "capabilities(canCopy)",
     });
 
-    const response = await fetch(
+    const response = await fetchDrive(
       `${DRIVE_FILES_URL}/${safeFileId}?${params}`,
       {
         headers: {
           Authorization: `Bearer ${accessToken}`,
         },
+      },
+      {
+        maxRetries: 3,
+        retryStatuses: SAFE_RETRY_STATUSES,
+        retryNetworkErrors: true,
       }
     );
 
@@ -637,7 +746,7 @@ export class GoogleDriveApi {
       appProperties,
     };
 
-    const response = await fetch(
+    const response = await fetchDrive(
       `${DRIVE_FILES_URL}/${safeFileId}/copy?${params}`,
       {
         method: "POST",
@@ -647,6 +756,13 @@ export class GoogleDriveApi {
             "application/json; charset=UTF-8",
         },
         body: JSON.stringify(metadata),
+      },
+      {
+        timeoutMs: COPY_DRIVE_TIMEOUT_MS,
+        // 429 means Drive rejected the request before processing it. Do not
+        // blindly retry ambiguous timeouts/5xx for a resource-creating POST.
+        maxRetries: 2,
+        retryStatuses: CREATE_RETRY_STATUSES,
       }
     );
 
@@ -679,7 +795,7 @@ export class GoogleDriveApi {
       fields: "id,trashed",
     });
 
-    const response = await fetch(
+    const response = await fetchDrive(
       `${DRIVE_FILES_URL}/${safeFileId}?${params}`,
       {
         method: "PATCH",
@@ -691,6 +807,11 @@ export class GoogleDriveApi {
         body: JSON.stringify({
           trashed: true,
         }),
+      },
+      {
+        maxRetries: 3,
+        retryStatuses: SAFE_RETRY_STATUSES,
+        retryNetworkErrors: true,
       }
     );
 

@@ -101,3 +101,44 @@ test("Drive copy omits book role for preserved non-book files", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("Drive listings retry transient rate limits", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return {
+        ok: false,
+        status: 429,
+        async json() {
+          return { error: { message: "rate limited" } };
+        },
+        async text() {
+          return "rate limited";
+        },
+      };
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { files: [] };
+      },
+    };
+  };
+
+  try {
+    const api = new GoogleDriveApi();
+    const entries = await api.listFolderEntries(
+      "token",
+      "parent"
+    );
+    assert.equal(calls, 2);
+    assert.deepEqual(entries, { folders: [], files: [] });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

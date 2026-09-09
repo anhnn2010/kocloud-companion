@@ -1851,6 +1851,9 @@ function renderWholeFolderPreview() {
       `${progress.replaced || 0} replaced · ` +
       `${progress.skipped || 0} skipped` +
       (progress.failed ? ` · ${progress.failed} failed` : "") +
+      (progress.folderFailed
+        ? ` · ${progress.folderFailed} folder errors`
+        : "") +
       (rate ? ` · ${rate}` : "") +
       (elapsed ? ` · ${elapsed}` : "");
     return;
@@ -1918,11 +1921,21 @@ async function handleImportWholeFolder() {
     skipped: 0,
     blocked: 0,
     failed: 0,
+    folderFailed: 0,
     currentPath: plan.sourceFolder.name,
     startedAt: Date.now(),
   };
   renderWholeFolderPreview();
   updateDriveImportControls();
+
+  // Repaint elapsed time even while the current Drive request is still in
+  // flight. This gives long-running imports a visible heartbeat instead of
+  // making the companion look frozen between progress callbacks.
+  const progressHeartbeatId = window.setInterval(() => {
+    if (state.wholeFolderImporting) {
+      renderWholeFolderPreview();
+    }
+  }, 1000);
 
   let shouldRefreshLibrary = false;
 
@@ -1972,6 +1985,7 @@ async function handleImportWholeFolder() {
       );
     }
   } finally {
+    window.clearInterval(progressHeartbeatId);
     state.wholeFolderImportController = null;
     state.wholeFolderImporting = false;
     state.wholeFolderScanProgress = null;
@@ -2002,6 +2016,7 @@ function formatWholeFolderResult(prefix, counts) {
     ["skipped", "skipped"],
     ["blocked", "blocked"],
     ["failed", "failed"],
+    ["folderFailed", "folder errors"],
   ]) {
     if ((counts[key] || 0) > 0) {
       parts.push(`${counts[key]} ${label}`);

@@ -224,11 +224,13 @@ export class ImportExecutor {
       currentPath: plan.sourceFolder?.name || "Source folder",
       startedAt: Date.now(),
     };
-    const limiter =
-      options.limiter ||
-      createConcurrencyLimiter(
-        options.maxConcurrency || 4
-      );
+    const maxConcurrency = Math.max(
+      1,
+      Math.floor(Number(options.maxConcurrency) || 4)
+    );
+    const networkLimiter =
+      options.limiter || createConcurrencyLimiter(maxConcurrency);
+    const folderLimiter = createConcurrencyLimiter(maxConcurrency);
     const destinationCache = new Map();
     const reporter = this.#createProgressReporter(
       progress,
@@ -243,7 +245,7 @@ export class ImportExecutor {
         await this.#getDestinationEntries(
           plan.destinationFolderId,
           destinationCache,
-          limiter,
+          networkLimiter,
           options.signal
         );
 
@@ -253,22 +255,25 @@ export class ImportExecutor {
           plan.sourceFolder.name,
           destinationParent,
           destinationCache,
-          limiter,
+          networkLimiter,
           options.signal
         );
 
-      await this.#importSourceNodeDirect(
-        plan.sourceFolder,
-        destinationRoot,
+      await this.#walkSourceNodeDirect(
+        {
+          sourceFolder: plan.sourceFolder,
+          destinationFolder: destinationRoot,
+          path: [],
+          ancestorIds: new Set(),
+        },
         duplicatePolicy,
         counts,
         progress,
         reporter,
         destinationCache,
-        limiter,
-        options,
-        [],
-        new Set()
+        networkLimiter,
+        folderLimiter,
+        options
       );
 
       reporter(true);
@@ -286,36 +291,97 @@ export class ImportExecutor {
   }
 
   /**
-   * @param {{id: string, name: string}} sourceFolder
-   * @param {{id: string, name: string}} destinationFolder
+   * Walk one source subtree while bounding whole-folder work separately from
+   * individual Drive requests. Keeping these two queues separate prevents a
+   * wide tree from flooding the network limiter with thousands of recursive
+   * list/copy operations.
+   *
+   * @param {object} job
    * @param {string} duplicatePolicy
    * @param {object} counts
    * @param {object} progress
    * @param {(force?: boolean) => void} reporter
    * @param {Map<string, Promise<object>>} destinationCache
-   * @param {object} limiter
+   * @param {object} networkLimiter
+   * @param {object} folderLimiter
    * @param {object} options
-   * @param {Array<string>} path
-   * @param {Set<string>} ancestorIds
    * @returns {Promise<void>}
    */
-  async #importSourceNodeDirect(
-    sourceFolder,
-    destinationFolder,
+  async #walkSourceNodeDirect(
+    job,
     duplicatePolicy,
     counts,
     progress,
     reporter,
     destinationCache,
-    limiter,
-    options,
-    path,
-    ancestorIds
+    networkLimiter,
+    folderLimiter,
+    options
+  ) {
+    const children = await folderLimiter.run(() =>
+      this.#processSourceNodeDirect(
+        job,
+        duplicatePolicy,
+        counts,
+        progress,
+        reporter,
+        destinationCache,
+        networkLimiter,
+        options
+      )
+    );
+
+    await Promise.all(
+      children.map((childJob) =>
+        this.#walkSourceNodeDirect(
+          childJob,
+          duplicatePolicy,
+          counts,
+          progress,
+          reporter,
+          destinationCache,
+          networkLimiter,
+          folderLimiter,
+          options
+        )
+      )
+    );
+  }
+
+  /**
+   * Process one source folder and return child jobs without recursing while a
+   * folder-worker slot is held.
+   *
+   * @param {object} job
+   * @param {string} duplicatePolicy
+   * @param {object} counts
+   * @param {object} progress
+   * @param {(force?: boolean) => void} reporter
+   * @param {Map<string, Promise<object>>} destinationCache
+   * @param {object} networkLimiter
+   * @param {object} options
+   * @returns {Promise<Array<object>>}
+   */
+  async #processSourceNodeDirect(
+    job,
+    duplicatePolicy,
+    counts,
+    progress,
+    reporter,
+    destinationCache,
+    networkLimiter,
+    options
   ) {
     throwIfAborted(options.signal);
 
+    const {
+      sourceFolder,
+      path,
+      ancestorIds,
+    } = job;
+
     if (ancestorIds.has(sourceFolder.id)) {
-      return;
+      return [];
     }
 
     const nextAncestorIds = new Set(ancestorIds);
@@ -326,23 +392,55 @@ export class ImportExecutor {
       sourceFolder.name || "Folder",
     ];
 
-    const [sourceEntries, destinationEntries] =
-      await Promise.all([
-        limiter.run(async () => {
-          throwIfAborted(options.signal);
-          const entries = await this.source.listEntries(
-            sourceFolder.id
+    let destinationFolder = job.destinationFolder;
+    let sourceEntries;
+    let destinationEntries;
+
+    try {
+      if (!destinationFolder) {
+        destinationFolder =
+          await this.#ensureFolderFromEntries(
+            job.destinationParentId,
+            sourceFolder.name,
+            job.destinationParentEntries,
+            destinationCache,
+            networkLimiter,
+            options.signal
           );
-          throwIfAborted(options.signal);
-          return entries;
-        }),
-        this.#getDestinationEntries(
-          destinationFolder.id,
-          destinationCache,
-          limiter,
-          options.signal
-        ),
-      ]);
+      }
+
+      [sourceEntries, destinationEntries] =
+        await Promise.all([
+          networkLimiter.run(async () => {
+            throwIfAborted(options.signal);
+            const entries = await this.source.listEntries(
+              sourceFolder.id
+            );
+            throwIfAborted(options.signal);
+            return entries;
+          }),
+          this.#getDestinationEntries(
+            destinationFolder.id,
+            destinationCache,
+            networkLimiter,
+            options.signal
+          ),
+        ]);
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        throw error;
+      }
+
+      console.error(
+        "KOCloud direct recursive folder failed:",
+        sourceFolder,
+        error
+      );
+      counts.folderFailed += 1;
+      progress.currentPath = currentPath.join(" / ");
+      reporter(true);
+      return [];
+    }
 
     progress.foldersProcessed += 1;
     progress.filesFound += sourceEntries.files.length;
@@ -388,21 +486,28 @@ export class ImportExecutor {
           );
         }
 
-        const copied = await limiter.run(async () => {
+        // Keep copy + replacement cleanup in the same network slot. If the
+        // copy completes, the old-file Trash request must not be queued behind
+        // thousands of unrelated recursive operations.
+        const copied = await networkLimiter.run(async () => {
           throwIfAborted(options.signal);
-          return this.source.copyFile(
+          const newCopy = await this.source.copyFile(
             file.id,
             destinationFolder.id,
             driveName
           );
+
+          if (isReplace) {
+            await this.#replaceExistingInCurrentSlot(
+              existing,
+              newCopy
+            );
+          }
+
+          return newCopy;
         });
 
         if (isReplace) {
-          await this.#replaceExistingWithLimiter(
-            existing,
-            copied,
-            limiter
-          );
           counts.replaced += 1;
           destinationEntries.filesByName.set(key, copied);
         } else {
@@ -429,35 +534,14 @@ export class ImportExecutor {
       reporter();
     }
 
-    await Promise.all(
-      sourceEntries.folders.map(async (childFolder) => {
-        throwIfAborted(options.signal);
-
-        const childDestination =
-          await this.#ensureFolderFromEntries(
-            destinationFolder.id,
-            childFolder.name,
-            destinationEntries,
-            destinationCache,
-            limiter,
-            options.signal
-          );
-
-        return this.#importSourceNodeDirect(
-          childFolder,
-          childDestination,
-          duplicatePolicy,
-          counts,
-          progress,
-          reporter,
-          destinationCache,
-          limiter,
-          options,
-          currentPath,
-          nextAncestorIds
-        );
-      })
-    );
+    return sourceEntries.folders.map((childFolder) => ({
+      sourceFolder: childFolder,
+      destinationFolder: null,
+      destinationParentId: destinationFolder.id,
+      destinationParentEntries: destinationEntries,
+      path: currentPath,
+      ancestorIds: nextAncestorIds,
+    }));
   }
 
   /**
@@ -547,23 +631,17 @@ export class ImportExecutor {
   }
 
   /**
-   * Replace one existing destination file while keeping network concurrency
-   * bounded by the same limiter as copy/list operations.
+   * Finish a replacement while the caller still owns its network slot.
+   *
+   * Keeping copy -> trash together prevents replacement cleanup from being
+   * starved behind a large FIFO queue produced by recursive folder traversal.
    */
-  async #replaceExistingWithLimiter(
-    existing,
-    copied,
-    limiter
-  ) {
+  async #replaceExistingInCurrentSlot(existing, copied) {
     try {
-      await limiter.run(() =>
-        this.source.trashFile(existing.id)
-      );
+      await this.source.trashFile(existing.id);
     } catch (replaceError) {
       try {
-        await limiter.run(() =>
-          this.source.trashFile(copied.id)
-        );
+        await this.source.trashFile(copied.id);
       } catch {
         // Keep the original replacement error below.
       }
@@ -831,6 +909,7 @@ export class ImportExecutor {
       skipped: 0,
       blocked: 0,
       failed: 0,
+      folderFailed: 0,
     };
   }
 }

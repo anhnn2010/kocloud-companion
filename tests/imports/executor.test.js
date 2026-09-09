@@ -322,3 +322,189 @@ test("direct whole-folder import reports partial counts when cancelled", async (
     }
   );
 });
+
+test("direct whole-folder import skips a failed child branch and continues siblings", async () => {
+  const copies = [];
+  const source = {
+    isBook() {
+      return true;
+    },
+    async listEntries(folderId) {
+      if (folderId === "source") {
+        return {
+          files: [],
+          folders: [
+            { id: "bad", name: "Bad" },
+            { id: "good", name: "Good" },
+          ],
+        };
+      }
+      if (folderId === "bad") {
+        throw new Error("simulated timeout");
+      }
+      return {
+        files: [
+          {
+            id: "good-book",
+            name: "Good.epub",
+            capabilities: { canCopy: true },
+          },
+        ],
+        folders: [],
+      };
+    },
+    async copyFile(id, folderId, name) {
+      copies.push({ id, folderId, name });
+      return { id: `copy-${id}`, name };
+    },
+    async trashFile() {},
+  };
+  const library = {
+    async listEntries(folderId) {
+      if (folderId === "destination") {
+        return { files: [], folders: [] };
+      }
+      return { files: [], folders: [] };
+    },
+    async createFolder(parentId, name) {
+      return { id: `${parentId}/${name}`, name };
+    },
+  };
+  const executor = new ImportExecutor({
+    source,
+    libraryService: library,
+  });
+
+  const counts = await executor.importWholeFolderDirect(
+    {
+      sourceFolder: { id: "source", name: "Source" },
+      destinationFolderId: "destination",
+      destinationPath: "KOCloud/Books",
+    },
+    "skip",
+    { maxConcurrency: 2 }
+  );
+
+  assert.equal(counts.imported, 1);
+  assert.equal(counts.folderFailed, 1);
+  assert.equal(copies.length, 1);
+  assert.equal(copies[0].name, "Good.epub");
+});
+
+test("direct replace keeps cleanup adjacent and bounds folder work", async () => {
+  const operationLog = [];
+  let activeFolderLists = 0;
+  let maxActiveFolderLists = 0;
+  const childCount = 12;
+  const childFolders = Array.from({ length: childCount }, (_, index) => ({
+    id: `source-child-${index}`,
+    name: `Child ${index}`,
+  }));
+
+  const source = {
+    isBook() {
+      return true;
+    },
+    async listEntries(folderId) {
+      activeFolderLists += 1;
+      maxActiveFolderLists = Math.max(
+        maxActiveFolderLists,
+        activeFolderLists
+      );
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      activeFolderLists -= 1;
+
+      if (folderId === "source") {
+        return { files: [], folders: childFolders };
+      }
+
+      const index = folderId.replace("source-child-", "");
+      return {
+        files: [
+          {
+            id: `source-file-${index}`,
+            name: `Book ${index}.epub`,
+            capabilities: { canCopy: true },
+          },
+        ],
+        folders: [],
+      };
+    },
+    async copyFile(id, folderId, name) {
+      operationLog.push(`copy:${id}`);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      return { id: `copy-${id}`, folderId, name };
+    },
+    async trashFile(id) {
+      operationLog.push(`trash:${id}`);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      return { id };
+    },
+  };
+
+  const library = {
+    async listEntries(folderId) {
+      if (folderId === "destination") {
+        return {
+          files: [],
+          folders: [{ id: "destination/Source", name: "Source" }],
+        };
+      }
+      if (folderId === "destination/Source") {
+        return {
+          files: [],
+          folders: childFolders.map((_folder, index) => ({
+            id: `destination/Source/Child ${index}`,
+            name: `Child ${index}`,
+          })),
+        };
+      }
+      const match = folderId.match(/Child (\d+)$/);
+      if (match) {
+        const index = match[1];
+        return {
+          files: [
+            {
+              id: `existing-${index}`,
+              name: `Book ${index}.epub`,
+            },
+          ],
+          folders: [],
+        };
+      }
+      return { files: [], folders: [] };
+    },
+    async createFolder(parentId, name) {
+      return { id: `${parentId}/${name}`, name };
+    },
+  };
+
+  const executor = new ImportExecutor({
+    source,
+    libraryService: library,
+  });
+
+  const counts = await executor.importWholeFolderDirect(
+    {
+      sourceFolder: { id: "source", name: "Source" },
+      destinationFolderId: "destination",
+      destinationPath: "KOCloud/Books",
+    },
+    "replace",
+    { maxConcurrency: 2 }
+  );
+
+  assert.equal(counts.replaced, childCount);
+  assert.equal(counts.failed, 0);
+  assert.ok(maxActiveFolderLists <= 2);
+
+  const firstTrashIndex = operationLog.findIndex((entry) =>
+    entry.startsWith("trash:")
+  );
+  const copiesBeforeFirstTrash = operationLog
+    .slice(0, firstTrashIndex)
+    .filter((entry) => entry.startsWith("copy:")).length;
+
+  assert.ok(firstTrashIndex >= 0);
+  assert.ok(copiesBeforeFirstTrash <= 2);
+});
