@@ -175,6 +175,7 @@ const state = {
   wholeFolderScanController: null,
   wholeFolderScanProgress: null,
   wholeFolderImporting: false,
+  wholeFolderImportController: null,
   wholeFolderPlan: null,
   wholeFolderDuplicatePolicy: "skip",
   driveSelection: [],
@@ -1636,24 +1637,23 @@ async function handleOpenDrivePicker() {
 }
 
 /**
- * Build a read-only recursive import preview with live progress and
- * cancellation. Source traversal and destination duplicate analysis are shown
- * as separate phases because either can take noticeable time on a large tree.
+ * Select the current source folder for direct recursive import.
+ *
+ * No source or destination pre-scan is performed. The user chooses the
+ * destination and duplicate behavior up front, then Start import traverses and
+ * copies in one pass.
  */
 async function handlePreviewWholeFolder() {
   if (
     state.busy ||
     state.driveImporting ||
     state.driveSourceFolderPicking ||
-    state.wholeFolderScanning ||
     state.wholeFolderImporting
   ) {
     return;
   }
 
-  const sourceFolder =
-    state.driveSourceFolder;
-
+  const sourceFolder = state.driveSourceFolder;
   const destinationFolderId =
     getDriveDestinationFolderId();
 
@@ -1670,247 +1670,60 @@ async function handlePreviewWholeFolder() {
     return;
   }
 
-  clearMessage(elements.driveImportMessage);
-
   state.driveSelection = [];
   renderDriveSelection();
 
-  const controller = new AbortController();
-  state.wholeFolderScanController = controller;
-  state.wholeFolderScanning = true;
-  state.wholeFolderPlan = null;
-  state.wholeFolderScanProgress = {
-    phase: "source",
-    foldersScanned: 0,
-    filesScanned: 0,
-    booksFound: 0,
-    currentPath: sourceFolder.name || "Source folder",
-    startedAt: Date.now(),
+  state.wholeFolderPlan = {
+    sourceFolder: {
+      id: sourceFolder.id,
+      name: sourceFolder.name,
+      isShortcut: Boolean(sourceFolder.isShortcut),
+    },
+    sourceFolderId: sourceFolder.id,
+    destinationFolderId,
+    destinationPath: getDriveDestinationPath(),
   };
+  state.wholeFolderScanProgress = null;
+
   renderWholeFolderPreview();
   updateDriveImportControls();
 
-  try {
-    const tree = await driveImportSource.scanTree(
-      sourceFolder,
-      new Set(),
-      {
-        signal: controller.signal,
-        onProgress(progress) {
-          state.wholeFolderScanProgress = {
-            phase: "source",
-            ...progress,
-            startedAt:
-              state.wholeFolderScanProgress?.startedAt ||
-              Date.now(),
-          };
-          renderWholeFolderPreview();
-        },
-      }
-    );
-
-    if (tree.fileCount === 0) {
-      setMessage(
-        elements.driveImportMessage,
-        `No files were found in ${sourceFolder.name} or its subfolders.`,
-        "success"
-      );
-      return;
-    }
-
-    state.wholeFolderScanProgress = {
-      phase: "duplicates",
-      checkedFolders: 0,
-      totalFolders: tree.folderCount,
-      currentPath: tree.name,
-      foldersScanned: tree.folderCount,
-      booksFound: tree.bookCount,
-      startedAt: Date.now(),
-    };
-    renderWholeFolderPreview();
-
-    state.wholeFolderPlan =
-      await importPlanner.createWholeFolderPlan(
-        tree,
-        sourceFolder.id,
-        destinationFolderId,
-        getDriveDestinationPath(),
-        {
-          signal: controller.signal,
-          onProgress(progress) {
-            state.wholeFolderScanProgress = {
-              phase: "duplicates",
-              ...progress,
-              foldersScanned: tree.folderCount,
-              booksFound: tree.bookCount,
-              startedAt:
-                state.wholeFolderScanProgress?.startedAt ||
-                Date.now(),
-            };
-            renderWholeFolderPreview();
-          },
-        }
-      );
-
-    const duplicateCount =
-      state.wholeFolderPlan.duplicateCount;
-
-    renderWholeFolderPreview();
-
-    setMessage(
-      elements.driveImportMessage,
-      `Whole-folder preview ready: ${tree.fileCount} file` +
-        `${tree.fileCount === 1 ? "" : "s"}, ` +
-        `${tree.bookCount} recognized book` +
-        `${tree.bookCount === 1 ? "" : "s"}, ` +
-        `${tree.folderCount} folder` +
-        `${tree.folderCount === 1 ? "" : "s"}, ` +
-        `${duplicateCount} duplicate` +
-        `${duplicateCount === 1 ? "" : "s"}.`,
-      "success"
-    );
-  } catch (error) {
-    state.wholeFolderPlan = null;
-
-    if (error?.name === "AbortError") {
-      setMessage(
-        elements.driveImportMessage,
-        "Folder scan cancelled. No files were changed.",
-        ""
-      );
-    } else {
-      setMessage(
-        elements.driveImportMessage,
-        `Could not scan whole source folder: ${getErrorMessage(error)}`,
-        "error"
-      );
-    }
-  } finally {
-    state.wholeFolderScanController = null;
-    state.wholeFolderScanning = false;
-    state.wholeFolderScanProgress = null;
-    renderWholeFolderPreview();
-    updateDriveImportControls();
-  }
+  setMessage(
+    elements.driveImportMessage,
+    "Ready for direct folder import. Choose how duplicates should be handled, then start import.",
+    "success"
+  );
 }
 
 /**
- * Refresh the recursive preview after the destination changes.
- *
- * The source tree is reused; only destination duplicate analysis is repeated.
- * This avoids forcing the user to scan the source folder again.
+ * Update the direct recursive-import target after the destination changes.
  */
 async function refreshWholeFolderPlanForDestination() {
   const plan = state.wholeFolderPlan;
 
-  if (
-    !plan ||
-    state.wholeFolderScanning ||
-    state.wholeFolderImporting
-  ) {
+  if (!plan || state.wholeFolderImporting) {
     return;
   }
 
   const destinationFolderId =
     getDriveDestinationFolderId();
 
-  if (
-    !googleAuth.getAccessToken() ||
-    !destinationFolderId
-  ) {
+  if (!destinationFolderId) {
     return;
   }
 
-  const controller = new AbortController();
-  state.wholeFolderScanController = controller;
-  state.wholeFolderScanning = true;
-  state.wholeFolderScanProgress = {
-    phase: "duplicates",
-    checkedFolders: 0,
-    totalFolders: plan.tree.folderCount,
-    currentPath: plan.tree.name,
-    foldersScanned: plan.tree.folderCount,
-    booksFound: plan.tree.bookCount,
-    startedAt: Date.now(),
-  };
-  updateDriveImportControls();
+  plan.destinationFolderId = destinationFolderId;
+  plan.destinationPath = getDriveDestinationPath();
   renderWholeFolderPreview();
-
-  try {
-    const refreshedPlan =
-      await importPlanner.refreshWholeFolderPlan(
-        plan,
-        destinationFolderId,
-        getDriveDestinationPath(),
-        {
-          signal: controller.signal,
-          onProgress(progress) {
-            state.wholeFolderScanProgress = {
-              phase: "duplicates",
-              ...progress,
-              foldersScanned: plan.tree.folderCount,
-              booksFound: plan.tree.bookCount,
-              startedAt:
-                state.wholeFolderScanProgress?.startedAt ||
-                Date.now(),
-            };
-            renderWholeFolderPreview();
-          },
-        }
-      );
-
-    state.wholeFolderPlan = refreshedPlan;
-
-    const duplicateCount =
-      refreshedPlan.duplicateCount;
-
-    renderWholeFolderPreview();
-
-    setMessage(
-      elements.driveImportMessage,
-      `Destination updated: ${plan.tree.fileCount} file` +
-        `${plan.tree.fileCount === 1 ? "" : "s"}, ` +
-        `${plan.tree.bookCount} recognized book` +
-        `${plan.tree.bookCount === 1 ? "" : "s"}, ` +
-        `${plan.tree.folderCount} folder` +
-        `${plan.tree.folderCount === 1 ? "" : "s"}, ` +
-        `${duplicateCount} duplicate` +
-        `${duplicateCount === 1 ? "" : "s"}.`,
-      "success"
-    );
-  } catch (error) {
-    // The destination selector already changed. Do not leave a plan pointing
-    // at the previous destination after a cancelled/failed refresh.
-    state.wholeFolderPlan = null;
-
-    if (error?.name === "AbortError") {
-      setMessage(
-        elements.driveImportMessage,
-        "Destination check cancelled. Preview the folder again before importing.",
-        ""
-      );
-    } else {
-      setMessage(
-        elements.driveImportMessage,
-        `Could not refresh destination preview: ${getErrorMessage(error)}`,
-        "error"
-      );
-    }
-  } finally {
-    state.wholeFolderScanController = null;
-    state.wholeFolderScanning = false;
-    state.wholeFolderScanProgress = null;
-    renderWholeFolderPreview();
-    updateDriveImportControls();
-  }
 }
 
 /**
- * Cancel an active scan, otherwise clear the existing recursive preview.
+ * Cancel an active direct import, otherwise clear the selected whole-folder
+ * mode.
  */
 function handleWholeFolderPreviewAction() {
-  if (state.wholeFolderScanning) {
-    state.wholeFolderScanController?.abort();
+  if (state.wholeFolderImporting) {
+    state.wholeFolderImportController?.abort();
     return;
   }
 
@@ -1918,18 +1731,16 @@ function handleWholeFolderPreviewAction() {
 }
 
 /**
- * Clear the recursive import preview.
+ * Clear the direct recursive-import selection.
  */
 function clearWholeFolderPlan() {
-  if (
-    state.wholeFolderImporting ||
-    state.wholeFolderScanning
-  ) {
+  if (state.wholeFolderImporting) {
     return;
   }
 
   state.wholeFolderPlan = null;
   state.wholeFolderScanProgress = null;
+  state.wholeFolderImportController = null;
   renderWholeFolderPreview();
   updateDriveImportControls();
 }
@@ -1949,12 +1760,11 @@ function handleWholeFolderDuplicatePolicyChange() {
     return;
   }
 
-  state.wholeFolderDuplicatePolicy =
-    policy;
+  state.wholeFolderDuplicatePolicy = policy;
 }
 
 /**
- * Format elapsed scan time for a compact live status.
+ * Format elapsed import time for a compact live status.
  *
  * @param {number|undefined} startedAt
  * @returns {string}
@@ -1979,14 +1789,14 @@ function formatScanElapsed(startedAt) {
 }
 
 /**
- * Estimate observed source-scan throughput without inventing an ETA.
+ * Format observed direct-import throughput without inventing an ETA.
  *
- * @param {number} booksFound
+ * @param {number} filesProcessed
  * @param {number|undefined} startedAt
  * @returns {string}
  */
-function formatScanRate(booksFound, startedAt) {
-  if (!startedAt || booksFound <= 0) {
+function formatScanRate(filesProcessed, startedAt) {
+  if (!startedAt || filesProcessed <= 0) {
     return "";
   }
 
@@ -1996,72 +1806,53 @@ function formatScanRate(booksFound, startedAt) {
     return "";
   }
 
-  const booksPerMinute = Math.round(
-    booksFound / (elapsedMs / 60000)
+  const filesPerMinute = Math.round(
+    filesProcessed / (elapsedMs / 60000)
   );
 
-  return `${booksPerMinute} books/min`;
+  return `${filesPerMinute} files/min`;
 }
 
 /**
- * Render recursive whole-folder preview and live scan progress.
+ * Render direct whole-folder import configuration and live execution progress.
  */
 function renderWholeFolderPreview() {
   const plan = state.wholeFolderPlan;
-  const progress =
-    state.wholeFolderScanProgress;
+  const progress = state.wholeFolderScanProgress;
 
-  elements.wholeFolderPreview.hidden =
-    !plan && !state.wholeFolderScanning;
-
+  elements.wholeFolderPreview.hidden = !plan;
   elements.wholeFolderScanProgress.parentElement.hidden =
-    !state.wholeFolderScanning;
+    !state.wholeFolderImporting;
 
   elements.clearWholeFolderPreview.textContent =
-    state.wholeFolderScanning
-      ? "Cancel"
-      : "Clear";
+    state.wholeFolderImporting ? "Cancel" : "Clear";
 
-  if (state.wholeFolderScanning && progress) {
-    if (progress.phase === "duplicates") {
-      const checked =
-        progress.checkedFolders || 0;
-      const total =
-        progress.totalFolders || 1;
+  elements.wholeFolderDuplicatePolicy.value =
+    state.wholeFolderDuplicatePolicy;
 
-      elements.wholeFolderSummary.textContent =
-        "Checking destination duplicates…";
-      elements.wholeFolderTarget.textContent =
-        `Current: ${progress.currentPath || "…"}`;
+  if (state.wholeFolderImporting && progress) {
+    elements.wholeFolderSummary.textContent =
+      "Importing folder + subfolders…";
+    elements.wholeFolderTarget.textContent =
+      `Current: ${progress.currentPath || "…"}`;
+    elements.wholeFolderScanProgress.removeAttribute("value");
 
-      elements.wholeFolderScanProgress.max = total;
-      elements.wholeFolderScanProgress.value = checked;
-      const elapsed = formatScanElapsed(progress.startedAt);
-      elements.wholeFolderScanProgressText.textContent =
-        `${checked} / ${total} folders` +
-        (elapsed ? ` · ${elapsed}` : "");
-    } else {
-      elements.wholeFolderSummary.textContent =
-        "Scanning source folder…";
-      elements.wholeFolderTarget.textContent =
-        `Current: ${progress.currentPath || "…"}`;
+    const elapsed = formatScanElapsed(progress.startedAt);
+    const rate = formatScanRate(
+      progress.filesProcessed || 0,
+      progress.startedAt
+    );
 
-      elements.wholeFolderScanProgress.removeAttribute(
-        "value"
-      );
-      const elapsed = formatScanElapsed(progress.startedAt);
-      const rate = formatScanRate(
-        progress.booksFound || 0,
-        progress.startedAt
-      );
-      elements.wholeFolderScanProgressText.textContent =
-        `${progress.foldersScanned || 0} folders · ` +
-        `${progress.filesScanned || 0} files · ` +
-        `${progress.booksFound || 0} books` +
-        (rate ? ` · ${rate}` : "") +
-        (elapsed ? ` · ${elapsed}` : "");
-    }
-
+    elements.wholeFolderScanProgressText.textContent =
+      `${progress.foldersProcessed || 0} folders · ` +
+      `${progress.filesFound || 0} files found · ` +
+      `${progress.filesProcessed || 0} processed · ` +
+      `${progress.imported || 0} imported · ` +
+      `${progress.replaced || 0} replaced · ` +
+      `${progress.skipped || 0} skipped` +
+      (progress.failed ? ` · ${progress.failed} failed` : "") +
+      (rate ? ` · ${rate}` : "") +
+      (elapsed ? ` · ${elapsed}` : "");
     return;
   }
 
@@ -2075,33 +1866,19 @@ function renderWholeFolderPreview() {
     return;
   }
 
-  const tree = plan.tree;
-
   elements.wholeFolderSummary.textContent =
-    `${tree.fileCount} file` +
-    `${tree.fileCount === 1 ? "" : "s"} · ` +
-    `${tree.bookCount} recognized book` +
-    `${tree.bookCount === 1 ? "" : "s"} · ` +
-    `${tree.folderCount} folder` +
-    `${tree.folderCount === 1 ? "" : "s"} · ` +
-    `${plan.duplicateCount} duplicate` +
-    `${plan.duplicateCount === 1 ? "" : "s"}`;
-
+    `Direct import: ${plan.sourceFolder.name}`;
   elements.wholeFolderTarget.textContent =
-    `Destination: ${plan.destinationPath}/${tree.name}`;
-
-  elements.wholeFolderDuplicatePolicy.value =
-    state.wholeFolderDuplicatePolicy;
+    `Destination: ${plan.destinationPath}/${plan.sourceFolder.name}`;
 }
 
 /**
- * Apply the current recursive whole-folder import preview.
+ * Start direct recursive import without a full source/destination pre-scan.
  */
 async function handleImportWholeFolder() {
   if (
     state.busy ||
     state.driveImporting ||
-    state.wholeFolderScanning ||
     state.wholeFolderImporting
   ) {
     return;
@@ -2112,18 +1889,14 @@ async function handleImportWholeFolder() {
   if (!plan || !googleAuth.getAccessToken()) {
     setMessage(
       elements.driveImportMessage,
-      "Preview the whole folder before importing.",
+      "Choose the folder + subfolders mode before importing.",
       "error"
     );
     return;
   }
 
-  if (
-    state.driveSourceFolder?.id !==
-      plan.sourceFolderId
-  ) {
+  if (state.driveSourceFolder?.id !== plan.sourceFolderId) {
     clearWholeFolderPlan();
-
     setMessage(
       elements.driveImportMessage,
       "Source folder changed. Select the folder + subfolders mode again.",
@@ -2132,75 +1905,112 @@ async function handleImportWholeFolder() {
     return;
   }
 
+  const controller = new AbortController();
+  state.wholeFolderImportController = controller;
   state.wholeFolderImporting = true;
+  state.wholeFolderScanProgress = {
+    foldersProcessed: 0,
+    filesFound: 0,
+    booksFound: 0,
+    filesProcessed: 0,
+    imported: 0,
+    replaced: 0,
+    skipped: 0,
+    blocked: 0,
+    failed: 0,
+    currentPath: plan.sourceFolder.name,
+    startedAt: Date.now(),
+  };
+  renderWholeFolderPreview();
   updateDriveImportControls();
+
+  let shouldRefreshLibrary = false;
 
   try {
     const counts =
-      await importExecutor.importWholeFolder(
+      await importExecutor.importWholeFolderDirect(
         plan,
-        state.wholeFolderDuplicatePolicy
+        state.wholeFolderDuplicatePolicy,
+        {
+          signal: controller.signal,
+          maxConcurrency: 4,
+          onProgress(progress) {
+            state.wholeFolderScanProgress = progress;
+            renderWholeFolderPreview();
+          },
+        }
       );
 
-    const resultParts = [];
-
-    if (counts.imported > 0) {
-      resultParts.push(
-        `${counts.imported} imported`
-      );
-    }
-
-    if (counts.replaced > 0) {
-      resultParts.push(
-        `${counts.replaced} replaced`
-      );
-    }
-
-    if (counts.skipped > 0) {
-      resultParts.push(
-        `${counts.skipped} skipped`
-      );
-    }
-
-    if (counts.blocked > 0) {
-      resultParts.push(
-        `${counts.blocked} blocked`
-      );
-    }
-
-    if (counts.failed > 0) {
-      resultParts.push(
-        `${counts.failed} failed`
-      );
-    }
+    shouldRefreshLibrary = true;
 
     setMessage(
       elements.driveImportMessage,
-      resultParts.length > 0
-        ? `Whole folder import complete: ${resultParts.join(", ")}.`
-        : "Whole folder import completed with no file changes.",
-      counts.blocked > 0 ||
-        counts.failed > 0
+      formatWholeFolderResult(
+        "Whole folder import complete",
+        counts
+      ),
+      counts.blocked > 0 || counts.failed > 0
         ? "error"
         : "success"
     );
-
-    await loadDriveImportFolders();
-    await loadLibrary();
-
-    state.wholeFolderPlan = null;
-    renderWholeFolderPreview();
   } catch (error) {
-    setMessage(
-      elements.driveImportMessage,
-      `Whole folder import failed: ${getErrorMessage(error)}`,
-      "error"
-    );
+    if (error?.name === "AbortError") {
+      shouldRefreshLibrary = true;
+      setMessage(
+        elements.driveImportMessage,
+        formatWholeFolderResult(
+          "Import cancelled; completed files were kept",
+          error.counts || {}
+        ),
+        ""
+      );
+    } else {
+      setMessage(
+        elements.driveImportMessage,
+        `Whole folder import failed: ${getErrorMessage(error)}`,
+        "error"
+      );
+    }
   } finally {
+    state.wholeFolderImportController = null;
     state.wholeFolderImporting = false;
+    state.wholeFolderScanProgress = null;
+
+    if (shouldRefreshLibrary) {
+      await loadDriveImportFolders();
+      await loadLibrary();
+    }
+
     renderWholeFolderPreview();
     updateDriveImportControls();
   }
+}
+
+/**
+ * Format final/partial direct-import counters.
+ *
+ * @param {string} prefix
+ * @param {object} counts
+ * @returns {string}
+ */
+function formatWholeFolderResult(prefix, counts) {
+  const parts = [];
+
+  for (const [key, label] of [
+    ["imported", "imported"],
+    ["replaced", "replaced"],
+    ["skipped", "skipped"],
+    ["blocked", "blocked"],
+    ["failed", "failed"],
+  ]) {
+    if ((counts[key] || 0) > 0) {
+      parts.push(`${counts[key]} ${label}`);
+    }
+  }
+
+  return parts.length > 0
+    ? `${prefix}: ${parts.join(", ")}.`
+    : `${prefix}: no file changes.`;
 }
 
 /**
@@ -2443,14 +2253,13 @@ function updateDriveImportControls() {
     !canOpenPicker;
 
   elements.previewWholeFolder.disabled =
-    !canScanSource;
+    !canScanSource ||
+    Boolean(state.wholeFolderPlan);
 
   elements.previewWholeFolder.textContent =
-    state.wholeFolderScanning
-      ? "Scanning whole folder…"
-      : state.wholeFolderPlan
-        ? "Refresh folder + subfolders"
-        : "This folder + subfolders";
+    state.wholeFolderPlan
+      ? "Folder + subfolders selected"
+      : "This folder + subfolders";
 
   elements.importWholeFolder.disabled =
     !ready ||
@@ -2458,17 +2267,15 @@ function updateDriveImportControls() {
 
   elements.importWholeFolder.textContent =
     state.wholeFolderImporting
-      ? "Importing whole folder…"
-      : "Confirm import";
+      ? "Importing…"
+      : "Start import";
 
   elements.wholeFolderDuplicatePolicy.disabled =
-    state.wholeFolderScanning ||
     state.wholeFolderImporting;
 
   elements.clearWholeFolderPreview.disabled =
-    state.wholeFolderImporting ||
-    (!state.wholeFolderScanning &&
-      !state.wholeFolderPlan);
+    !state.wholeFolderImporting &&
+    !state.wholeFolderPlan;
 
   elements.clearDriveSelection.disabled =
     !ready ||
@@ -4434,6 +4241,8 @@ function setLocalBookPickersDisabled(disabled) {
 function setDisconnectedState() {
   state.wholeFolderScanController?.abort();
   state.wholeFolderScanController = null;
+  state.wholeFolderImportController?.abort();
+  state.wholeFolderImportController = null;
   state.wholeFolderScanning = false;
   state.wholeFolderScanProgress = null;
   state.driveSourceFolder = null;

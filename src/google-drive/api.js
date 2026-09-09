@@ -85,6 +85,7 @@ export class GoogleDriveApi {
           "nextPageToken," +
           "files(" +
           "id,name,mimeType,parents,appProperties,size,modifiedTime," +
+          "capabilities(canCopy)," +
           "shortcutDetails(targetId,targetMimeType)" +
           ")",
       });

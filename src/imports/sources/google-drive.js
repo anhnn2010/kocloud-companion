@@ -92,6 +92,17 @@ export class GoogleDriveImportSource {
   }
 
   /**
+   * Return whether one source file is a recognized KOReader book.
+   * Recognition is informational for folder imports; all files are preserved.
+   *
+   * @param {{name: string}} file
+   * @returns {boolean}
+   */
+  isBook(file) {
+    return this.isSupportedBook(file);
+  }
+
+  /**
    * Read current metadata and copy capability for one source file.
    *
    * @param {string} fileId

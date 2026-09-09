@@ -356,8 +356,8 @@
       </button>
 
       <p class="help-text">
-        Select individual files, or import the whole source folder recursively
-        while preserving every file and its folder structure.
+        Select individual files, or choose the whole source folder recursively.
+        Whole-folder import starts directly without scanning everything first.
       </p>
 
       <div
@@ -416,9 +416,8 @@
         </select>
 
         <p class="help-text">
-          Existing folders with the same name are reused. The recursive import
-          preserves every non-folder file; recognized book formats are shown
-          separately for information.
+          Existing folders with the same name are reused. Files are discovered
+          and imported in one pass; recognized book formats are informational only.
         </p>
 
         <button
@@ -427,7 +426,7 @@
           class="primary-button full-width"
           disabled
         >
-          Confirm import
+          Start import
         </button>
       </div>
 

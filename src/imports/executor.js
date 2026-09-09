@@ -2,6 +2,9 @@ import {
   createAvailableBookName,
   normalizeBookName,
 } from "../core/book-names.js";
+import {
+  createConcurrencyLimiter,
+} from "../core/concurrency.js";
 
 /**
  * Execute KOCloud imports from a remote source into the library.
@@ -185,6 +188,422 @@ export class ImportExecutor {
     }
 
     return counts;
+  }
+
+  /**
+   * Recursively discover and import a source folder in one pass.
+   *
+   * Unlike the legacy preview flow, this method does not build a complete
+   * source tree or scan the whole destination before copying. Each source
+   * folder is listed once, its matching destination folder is resolved
+   * lazily, and files are handled immediately according to the global
+   * duplicate policy.
+   *
+   * @param {object} plan
+   * @param {{id: string, name: string}} plan.sourceFolder
+   * @param {string} plan.destinationFolderId
+   * @param {string} plan.destinationPath
+   * @param {"skip"|"replace"|"keep-both"} duplicatePolicy
+   * @param {object} options
+   * @param {AbortSignal} [options.signal]
+   * @param {(progress: object) => void} [options.onProgress]
+   * @param {number} [options.maxConcurrency]
+   * @returns {Promise<object>}
+   */
+  async importWholeFolderDirect(
+    plan,
+    duplicatePolicy,
+    options = {}
+  ) {
+    const counts = this.#createCounts();
+    const progress = {
+      foldersProcessed: 0,
+      filesFound: 0,
+      booksFound: 0,
+      filesProcessed: 0,
+      currentPath: plan.sourceFolder?.name || "Source folder",
+      startedAt: Date.now(),
+    };
+    const limiter =
+      options.limiter ||
+      createConcurrencyLimiter(
+        options.maxConcurrency || 4
+      );
+    const destinationCache = new Map();
+    const reporter = this.#createProgressReporter(
+      progress,
+      counts,
+      options.onProgress
+    );
+
+    try {
+      throwIfAborted(options.signal);
+
+      const destinationParent =
+        await this.#getDestinationEntries(
+          plan.destinationFolderId,
+          destinationCache,
+          limiter,
+          options.signal
+        );
+
+      const destinationRoot =
+        await this.#ensureFolderFromEntries(
+          plan.destinationFolderId,
+          plan.sourceFolder.name,
+          destinationParent,
+          destinationCache,
+          limiter,
+          options.signal
+        );
+
+      await this.#importSourceNodeDirect(
+        plan.sourceFolder,
+        destinationRoot,
+        duplicatePolicy,
+        counts,
+        progress,
+        reporter,
+        destinationCache,
+        limiter,
+        options,
+        [],
+        new Set()
+      );
+
+      reporter(true);
+      return counts;
+    } catch (error) {
+      reporter(true);
+
+      if (error?.name === "AbortError") {
+        error.counts = { ...counts };
+        error.progress = { ...progress };
+      }
+
+      throw error;
+    }
+  }
+
+  /**
+   * @param {{id: string, name: string}} sourceFolder
+   * @param {{id: string, name: string}} destinationFolder
+   * @param {string} duplicatePolicy
+   * @param {object} counts
+   * @param {object} progress
+   * @param {(force?: boolean) => void} reporter
+   * @param {Map<string, Promise<object>>} destinationCache
+   * @param {object} limiter
+   * @param {object} options
+   * @param {Array<string>} path
+   * @param {Set<string>} ancestorIds
+   * @returns {Promise<void>}
+   */
+  async #importSourceNodeDirect(
+    sourceFolder,
+    destinationFolder,
+    duplicatePolicy,
+    counts,
+    progress,
+    reporter,
+    destinationCache,
+    limiter,
+    options,
+    path,
+    ancestorIds
+  ) {
+    throwIfAborted(options.signal);
+
+    if (ancestorIds.has(sourceFolder.id)) {
+      return;
+    }
+
+    const nextAncestorIds = new Set(ancestorIds);
+    nextAncestorIds.add(sourceFolder.id);
+
+    const currentPath = [
+      ...path,
+      sourceFolder.name || "Folder",
+    ];
+
+    const [sourceEntries, destinationEntries] =
+      await Promise.all([
+        limiter.run(async () => {
+          throwIfAborted(options.signal);
+          const entries = await this.source.listEntries(
+            sourceFolder.id
+          );
+          throwIfAborted(options.signal);
+          return entries;
+        }),
+        this.#getDestinationEntries(
+          destinationFolder.id,
+          destinationCache,
+          limiter,
+          options.signal
+        ),
+      ]);
+
+    progress.foldersProcessed += 1;
+    progress.filesFound += sourceEntries.files.length;
+    progress.booksFound += sourceEntries.files.filter(
+      (file) => this.source.isBook?.(file) ?? false
+    ).length;
+    progress.currentPath = currentPath.join(" / ");
+    reporter();
+
+    for (const file of sourceEntries.files) {
+      throwIfAborted(options.signal);
+
+      try {
+        if (file.capabilities?.canCopy === false) {
+          counts.blocked += 1;
+          progress.filesProcessed += 1;
+          reporter();
+          continue;
+        }
+
+        const key = normalizeBookName(file.name);
+        const existing =
+          destinationEntries.filesByName.get(key) || null;
+
+        if (existing && duplicatePolicy === "skip") {
+          counts.skipped += 1;
+          progress.filesProcessed += 1;
+          reporter();
+          continue;
+        }
+
+        const isReplace =
+          Boolean(existing) && duplicatePolicy === "replace";
+        const isKeepBoth =
+          Boolean(existing) && duplicatePolicy === "keep-both";
+
+        let driveName = file.name;
+
+        if (isKeepBoth) {
+          driveName = createAvailableBookName(
+            file.name,
+            destinationEntries.filesByName
+          );
+        }
+
+        const copied = await limiter.run(async () => {
+          throwIfAborted(options.signal);
+          return this.source.copyFile(
+            file.id,
+            destinationFolder.id,
+            driveName
+          );
+        });
+
+        if (isReplace) {
+          await this.#replaceExistingWithLimiter(
+            existing,
+            copied,
+            limiter
+          );
+          counts.replaced += 1;
+          destinationEntries.filesByName.set(key, copied);
+        } else {
+          counts.imported += 1;
+          destinationEntries.filesByName.set(
+            normalizeBookName(driveName),
+            copied
+          );
+        }
+      } catch (error) {
+        if (error?.name === "AbortError") {
+          throw error;
+        }
+
+        console.error(
+          "KOCloud direct recursive import failed:",
+          file,
+          error
+        );
+        counts.failed += 1;
+      }
+
+      progress.filesProcessed += 1;
+      reporter();
+    }
+
+    await Promise.all(
+      sourceEntries.folders.map(async (childFolder) => {
+        throwIfAborted(options.signal);
+
+        const childDestination =
+          await this.#ensureFolderFromEntries(
+            destinationFolder.id,
+            childFolder.name,
+            destinationEntries,
+            destinationCache,
+            limiter,
+            options.signal
+          );
+
+        return this.#importSourceNodeDirect(
+          childFolder,
+          childDestination,
+          duplicatePolicy,
+          counts,
+          progress,
+          reporter,
+          destinationCache,
+          limiter,
+          options,
+          currentPath,
+          nextAncestorIds
+        );
+      })
+    );
+  }
+
+  /**
+   * Load one destination folder once per direct-import run.
+   *
+   * @param {string} folderId
+   * @param {Map<string, Promise<object>>} cache
+   * @param {object} limiter
+   * @param {AbortSignal|undefined} signal
+   * @returns {Promise<object>}
+   */
+  async #getDestinationEntries(
+    folderId,
+    cache,
+    limiter,
+    signal
+  ) {
+    if (!cache.has(folderId)) {
+      cache.set(
+        folderId,
+        limiter.run(async () => {
+          throwIfAborted(signal);
+          const entries =
+            typeof this.library.listEntries === "function"
+              ? await this.library.listEntries(folderId)
+              : {
+                  folders: await this.library.listFolders(folderId),
+                  files: await this.library.listFiles(folderId),
+                };
+          throwIfAborted(signal);
+
+          return {
+            foldersByName: this.#buildNameMap(entries.folders),
+            filesByName: this.#buildNameMap(entries.files),
+          };
+        })
+      );
+    }
+
+    return cache.get(folderId);
+  }
+
+  /**
+   * Reuse or lazily create one destination child folder.
+   *
+   * @param {string} parentFolderId
+   * @param {string} name
+   * @param {object} parentEntries
+   * @param {Map<string, Promise<object>>} cache
+   * @param {object} limiter
+   * @param {AbortSignal|undefined} signal
+   * @returns {Promise<object>}
+   */
+  async #ensureFolderFromEntries(
+    parentFolderId,
+    name,
+    parentEntries,
+    cache,
+    limiter,
+    signal
+  ) {
+    const key = normalizeBookName(name);
+    const existing = parentEntries.foldersByName.get(key);
+
+    if (existing) {
+      return existing;
+    }
+
+    const created = await limiter.run(async () => {
+      throwIfAborted(signal);
+      return this.library.createFolder(parentFolderId, name);
+    });
+
+    parentEntries.foldersByName.set(key, created);
+
+    // A folder created by this import is known to be empty. Seed the cache so
+    // its first source node does not trigger an unnecessary Drive listing.
+    cache.set(
+      created.id,
+      Promise.resolve({
+        foldersByName: new Map(),
+        filesByName: new Map(),
+      })
+    );
+
+    return created;
+  }
+
+  /**
+   * Replace one existing destination file while keeping network concurrency
+   * bounded by the same limiter as copy/list operations.
+   */
+  async #replaceExistingWithLimiter(
+    existing,
+    copied,
+    limiter
+  ) {
+    try {
+      await limiter.run(() =>
+        this.source.trashFile(existing.id)
+      );
+    } catch (replaceError) {
+      try {
+        await limiter.run(() =>
+          this.source.trashFile(copied.id)
+        );
+      } catch {
+        // Keep the original replacement error below.
+      }
+
+      throw new Error(
+        "Replacement copy was created, but the old book " +
+          "could not be moved to Trash: " +
+          getErrorMessage(replaceError)
+      );
+    }
+  }
+
+  /**
+   * Throttle UI-facing progress updates while keeping counters exact.
+   */
+  #createProgressReporter(
+    progress,
+    counts,
+    onProgress = () => {}
+  ) {
+    let lastReportAt = 0;
+    let lastProcessed = -1;
+
+    return (force = false) => {
+      const now = Date.now();
+      const enoughFiles =
+        progress.filesProcessed - lastProcessed >= 10;
+      const enoughTime = now - lastReportAt >= 250;
+
+      if (!force && !enoughFiles && !enoughTime) {
+        return;
+      }
+
+      lastReportAt = now;
+      lastProcessed = progress.filesProcessed;
+      onProgress({
+        ...progress,
+        ...counts,
+      });
+    };
   }
 
   /**
@@ -414,6 +833,21 @@ export class ImportExecutor {
       failed: 0,
     };
   }
+}
+
+/**
+ * Throw a conventional AbortError at safe request/file boundaries.
+ *
+ * @param {AbortSignal|undefined} signal
+ */
+function throwIfAborted(signal) {
+  if (!signal?.aborted) {
+    return;
+  }
+
+  const error = new Error("Import cancelled.");
+  error.name = "AbortError";
+  throw error;
 }
 
 /**

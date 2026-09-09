@@ -50,6 +50,10 @@ test("Drive folder entries use one large-page child listing", async () => {
 
     assert.equal(requestUrl.searchParams.get("pageSize"), "1000");
     assert.match(
+      requestUrl.searchParams.get("fields"),
+      /capabilities\(canCopy\)/
+    );
+    assert.match(
       requestUrl.searchParams.get("q"),
       /'parent' in parents/
     );
