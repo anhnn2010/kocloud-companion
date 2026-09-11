@@ -834,3 +834,135 @@ progress {
     justify-content: end;
   }
 }
+
+/* Duplicate cleanup */
+
+.section-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.duplicate-cleanup {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: #fafbfc;
+  overflow: hidden;
+}
+
+.duplicate-scan-progress {
+  grid-template-columns: minmax(0, 1fr);
+  margin: 12px 14px 14px;
+}
+
+#duplicate-scan-progress-text {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.duplicate-results {
+  padding: 0 14px 14px;
+}
+
+.duplicate-result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 8px 0 10px;
+}
+
+.duplicate-group-list {
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+}
+
+.duplicate-group {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.duplicate-group:first-child {
+  margin-top: 0;
+}
+
+.duplicate-group-header {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.duplicate-group-title {
+  min-width: 0;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.duplicate-group-meta {
+  margin: 4px 0 10px 28px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.duplicate-copy-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.duplicate-copy {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  padding: 9px 0;
+  border-top: 1px solid var(--border);
+}
+
+.duplicate-copy-path {
+  min-width: 0;
+  font-size: 0.86rem;
+  overflow-wrap: anywhere;
+}
+
+.duplicate-copy-size {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.duplicate-copy-keep {
+  margin: 2px 0 0;
+}
+
+@media (max-width: 520px) {
+  .section-actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .section-actions .compact-button {
+    flex: 1 1 0;
+    width: auto;
+  }
+
+  .duplicate-copy {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .duplicate-copy-size {
+    grid-column: 2;
+    white-space: normal;
+  }
+}

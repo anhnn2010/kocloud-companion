@@ -57,6 +57,10 @@ function createService() {
       ]);
       return "replace-session";
     },
+    async trashFile(token, fileId) {
+      calls.push(["trash", token, fileId]);
+      return { id: fileId, trashed: true };
+    },
   };
 
   const service = new LibraryService({
@@ -86,6 +90,13 @@ test("library service owns destination operations", async () => {
   );
   assert.equal(session, "upload-session");
   assert.equal(calls.some(([name]) => name === "upload"), true);
+
+  const trashed = await service.trashFile("book-id");
+  assert.equal(trashed.trashed, true);
+  assert.deepEqual(
+    calls.find(([name]) => name === "trash"),
+    ["trash", "token", "book-id"]
+  );
 });
 
 test("library service fails consistently without auth", async () => {

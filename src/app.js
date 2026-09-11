@@ -7,6 +7,7 @@ import {
 } from "./imports/sources/google-drive.js";
 import { ImportPlanner } from "./imports/planner.js";
 import { ImportExecutor } from "./imports/executor.js";
+import { DuplicateScanner } from "./library/duplicate-scanner.js";
 import {
   createAvailableBookName,
   normalizeBookName,
@@ -47,6 +48,11 @@ const importPlanner = new ImportPlanner({
 const importExecutor = new ImportExecutor({
   source: driveImportSource,
   libraryService,
+});
+
+const duplicateScanner = new DuplicateScanner({
+  libraryService,
+  folderConcurrency: 4,
 });
 
 const elements = {
@@ -139,7 +145,36 @@ const elements = {
   batchProgressBar: document.getElementById("batch-progress-bar"),
   batchProgressText: document.getElementById("batch-progress-text"),
 
+  findDuplicates: document.getElementById("find-duplicates"),
   refreshLibrary: document.getElementById("refresh-library"),
+  duplicateCleanup:
+    document.getElementById("duplicate-cleanup"),
+  duplicateCleanupSummary:
+    document.getElementById("duplicate-cleanup-summary"),
+  closeDuplicateCleanup:
+    document.getElementById("close-duplicate-cleanup"),
+  duplicateScanProgress:
+    document.getElementById("duplicate-scan-progress"),
+  duplicateScanProgressBar:
+    document.getElementById("duplicate-scan-progress-bar"),
+  duplicateScanProgressText:
+    document.getElementById("duplicate-scan-progress-text"),
+  cancelDuplicateScan:
+    document.getElementById("cancel-duplicate-scan"),
+  duplicateResults:
+    document.getElementById("duplicate-results"),
+  duplicateResultsSummary:
+    document.getElementById("duplicate-results-summary"),
+  selectAllDuplicates:
+    document.getElementById("select-all-duplicates"),
+  clearDuplicateSelection:
+    document.getElementById("clear-duplicate-selection"),
+  duplicateGroupList:
+    document.getElementById("duplicate-group-list"),
+  cleanSelectedDuplicates:
+    document.getElementById("clean-selected-duplicates"),
+  duplicateCleanupMessage:
+    document.getElementById("duplicate-cleanup-message"),
   registerFolderBooks:
     document.getElementById("register-folder-books"),
   registerAllFolderBooks:
@@ -166,6 +201,13 @@ const state = {
   libraryLoading: false,
   registeringFolderBooks: false,
   registeringAllFolderBooks: false,
+  duplicateScanning: false,
+  duplicateScanController: null,
+  duplicateScanProgress: null,
+  duplicateGroups: [],
+  duplicateSelectedGroups: new Set(),
+  duplicateKeepByGroup: new Map(),
+  duplicateCleaning: false,
   driveSourceFolder: null,
   driveSourceFolderPicking: false,
   driveSourceBrowserFolders: [],
@@ -208,6 +250,7 @@ function init() {
   renderDriveSourceBrowser();
   renderWholeFolderPreview();
   renderDriveSelection();
+  renderDuplicateCleanup();
 
   elements.saveClientId.addEventListener(
     "click",
@@ -262,6 +305,36 @@ function init() {
   elements.refreshLibrary.addEventListener(
     "click",
     handleRefreshLibrary
+  );
+
+  elements.findDuplicates.addEventListener(
+    "click",
+    handleFindDuplicates
+  );
+
+  elements.cancelDuplicateScan.addEventListener(
+    "click",
+    handleCancelDuplicateScan
+  );
+
+  elements.closeDuplicateCleanup.addEventListener(
+    "click",
+    handleCloseDuplicateCleanup
+  );
+
+  elements.selectAllDuplicates.addEventListener(
+    "click",
+    handleSelectAllDuplicateGroups
+  );
+
+  elements.clearDuplicateSelection.addEventListener(
+    "click",
+    handleClearDuplicateSelection
+  );
+
+  elements.cleanSelectedDuplicates.addEventListener(
+    "click",
+    handleCleanSelectedDuplicates
   );
 
   elements.libraryBack.addEventListener(
@@ -2226,6 +2299,7 @@ function updateDriveImportControls() {
     !state.driveSourceFolderPicking &&
     !state.wholeFolderScanning &&
     !state.wholeFolderImporting &&
+    !isDuplicateMaintenanceBusy() &&
     googleAuth.isConnected();
 
   const pickerReady =
@@ -2309,6 +2383,7 @@ function updateDriveImportControls() {
     !state.driveImporting &&
     !state.wholeFolderScanning &&
     !state.wholeFolderImporting &&
+    !isDuplicateMaintenanceBusy() &&
     !state.driveFoldersLoading &&
     googleAuth.isConnected() &&
     Boolean(state.storage?.books?.id);
@@ -2804,6 +2879,524 @@ async function handleRefreshLibrary() {
 }
 
 /**
+ * Return whether duplicate-library maintenance is active.
+ *
+ * @returns {boolean}
+ */
+function isDuplicateMaintenanceBusy() {
+  return state.duplicateScanning || state.duplicateCleaning;
+}
+
+/**
+ * Start an exact-duplicate scan across KOCloud/Books and all subfolders.
+ */
+async function handleFindDuplicates() {
+  if (
+    state.busy ||
+    state.libraryLoading ||
+    isDuplicateMaintenanceBusy() ||
+    state.driveImporting ||
+    state.wholeFolderImporting
+  ) {
+    return;
+  }
+
+  const rootFolderId = state.storage?.books?.id;
+  if (!rootFolderId || !googleAuth.isConnected()) {
+    setMessage(
+      elements.libraryMessage,
+      "Connect Google Drive before scanning for duplicates.",
+      "error"
+    );
+    return;
+  }
+
+  state.duplicateScanning = true;
+  state.duplicateScanController = new AbortController();
+  state.duplicateScanProgress = {
+    foldersScanned: 0,
+    filesScanned: 0,
+    booksScanned: 0,
+    fingerprintedBooks: 0,
+    duplicateGroups: 0,
+    folderErrors: 0,
+    currentPath: "Books",
+    startedAt: Date.now(),
+  };
+  state.duplicateGroups = [];
+  state.duplicateSelectedGroups = new Set();
+  state.duplicateKeepByGroup = new Map();
+
+  clearMessage(elements.duplicateCleanupMessage);
+  renderDuplicateCleanup();
+  updateLibraryControls();
+  updateControls();
+  updateDriveImportControls();
+
+  const heartbeat = setInterval(() => {
+    if (state.duplicateScanning) {
+      renderDuplicateCleanup();
+    }
+  }, 1000);
+
+  try {
+    const result = await duplicateScanner.scan({
+      rootFolderId,
+      rootPath: "Books",
+      signal: state.duplicateScanController.signal,
+      onProgress(progress) {
+        state.duplicateScanProgress = {
+          ...progress,
+          startedAt: state.duplicateScanProgress?.startedAt || Date.now(),
+        };
+        renderDuplicateCleanup();
+      },
+    });
+
+    state.duplicateGroups = result.groups;
+    state.duplicateScanProgress = {
+      ...result,
+      startedAt: state.duplicateScanProgress?.startedAt || Date.now(),
+    };
+
+    for (const group of result.groups) {
+      const keepId = chooseDefaultDuplicateKeep(group);
+      if (keepId) {
+        state.duplicateKeepByGroup.set(group.id, keepId);
+      }
+    }
+
+    if (result.groups.length === 0) {
+      setMessage(
+        elements.duplicateCleanupMessage,
+        result.folderErrors
+          ? `No exact duplicate books found. ${result.folderErrors} folder` +
+              `${result.folderErrors === 1 ? "" : "s"} could not be scanned.`
+          : "No exact duplicate books found.",
+        "success"
+      );
+    }
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      setMessage(
+        elements.duplicateCleanupMessage,
+        "Duplicate scan cancelled. No files were changed."
+      );
+    } else {
+      setMessage(
+        elements.duplicateCleanupMessage,
+        `Duplicate scan failed: ${getErrorMessage(error)}`,
+        "error"
+      );
+    }
+  } finally {
+    clearInterval(heartbeat);
+    state.duplicateScanning = false;
+    state.duplicateScanController = null;
+    renderDuplicateCleanup();
+    updateLibraryControls();
+    updateControls();
+    updateDriveImportControls();
+  }
+}
+
+/**
+ * Cancel the current duplicate scan.
+ */
+function handleCancelDuplicateScan() {
+  state.duplicateScanController?.abort();
+}
+
+/**
+ * Hide duplicate results after scanning has finished.
+ */
+function handleCloseDuplicateCleanup() {
+  if (isDuplicateMaintenanceBusy()) {
+    return;
+  }
+
+  state.duplicateGroups = [];
+  state.duplicateScanProgress = null;
+  state.duplicateSelectedGroups = new Set();
+  state.duplicateKeepByGroup = new Map();
+  clearMessage(elements.duplicateCleanupMessage);
+  renderDuplicateCleanup();
+}
+
+/**
+ * Select every exact-duplicate group for cleanup.
+ */
+function handleSelectAllDuplicateGroups() {
+  if (isDuplicateMaintenanceBusy()) {
+    return;
+  }
+
+  state.duplicateSelectedGroups = new Set(
+    state.duplicateGroups.map((group) => group.id)
+  );
+  renderDuplicateCleanup();
+}
+
+/**
+ * Clear all duplicate-group cleanup selections.
+ */
+function handleClearDuplicateSelection() {
+  if (isDuplicateMaintenanceBusy()) {
+    return;
+  }
+
+  state.duplicateSelectedGroups = new Set();
+  renderDuplicateCleanup();
+}
+
+/**
+ * Pick the safest default file to keep: the oldest copy, then path order.
+ * Exact duplicates have identical content, so this only chooses which Drive
+ * placement survives when the user opts to clean the group.
+ *
+ * @param {object} group
+ * @returns {string|null}
+ */
+function chooseDefaultDuplicateKeep(group) {
+  const files = [...(group.files || [])];
+  files.sort((left, right) => {
+    const leftTime = Date.parse(left.modifiedTime || "") || 0;
+    const rightTime = Date.parse(right.modifiedTime || "") || 0;
+
+    if (leftTime !== rightTime) {
+      return leftTime - rightTime;
+    }
+
+    return String(left.path || "").localeCompare(
+      String(right.path || ""),
+      undefined,
+      { sensitivity: "base", numeric: true }
+    );
+  });
+  return files[0]?.id || null;
+}
+
+/**
+ * Move all non-kept copies from selected exact-duplicate groups to Trash.
+ */
+async function handleCleanSelectedDuplicates() {
+  if (isDuplicateMaintenanceBusy()) {
+    return;
+  }
+
+  const selectedGroups = state.duplicateGroups.filter(
+    (group) => state.duplicateSelectedGroups.has(group.id)
+  );
+
+  if (selectedGroups.length === 0) {
+    return;
+  }
+
+  const tasks = [];
+  for (const group of selectedGroups) {
+    const keepId =
+      state.duplicateKeepByGroup.get(group.id) ||
+      chooseDefaultDuplicateKeep(group);
+
+    for (const file of group.files || []) {
+      if (file.id !== keepId) {
+        tasks.push({ groupId: group.id, file });
+      }
+    }
+  }
+
+  if (tasks.length === 0) {
+    return;
+  }
+
+  state.duplicateCleaning = true;
+  updateLibraryControls();
+  updateControls();
+  updateDriveImportControls();
+  renderDuplicateCleanup();
+
+  let completed = 0;
+  let failed = 0;
+  const trashedIds = new Set();
+  const queue = [...tasks];
+  const workerCount = Math.min(4, queue.length);
+
+  const updateProgress = () => {
+    setMessage(
+      elements.duplicateCleanupMessage,
+      `Cleaning exact duplicates… ${completed}/${tasks.length}` +
+        (failed ? ` · ${failed} failed` : "")
+    );
+  };
+
+  updateProgress();
+
+  const worker = async () => {
+    while (queue.length > 0) {
+      const task = queue.shift();
+      if (!task) {
+        return;
+      }
+
+      try {
+        await libraryService.trashFile(task.file.id);
+        trashedIds.add(task.file.id);
+      } catch {
+        failed += 1;
+      } finally {
+        completed += 1;
+        updateProgress();
+      }
+    }
+  };
+
+  try {
+    await Promise.all(
+      Array.from({ length: workerCount }, () => worker())
+    );
+
+    state.duplicateGroups = state.duplicateGroups
+      .map((group) => ({
+        ...group,
+        files: (group.files || []).filter(
+          (file) => !trashedIds.has(file.id)
+        ),
+      }))
+      .filter((group) => group.files.length > 1)
+      .map((group) => ({
+        ...group,
+        duplicateCopies: group.files.length - 1,
+        reclaimableBytes:
+          (group.files[0]?.size || 0) * (group.files.length - 1),
+      }));
+
+    state.duplicateSelectedGroups = new Set(
+      [...state.duplicateSelectedGroups].filter((groupId) =>
+        state.duplicateGroups.some((group) => group.id === groupId)
+      )
+    );
+
+    for (const group of state.duplicateGroups) {
+      const currentKeep = state.duplicateKeepByGroup.get(group.id);
+      if (!group.files.some((file) => file.id === currentKeep)) {
+        state.duplicateKeepByGroup.set(
+          group.id,
+          chooseDefaultDuplicateKeep(group)
+        );
+      }
+    }
+
+    setMessage(
+      elements.duplicateCleanupMessage,
+      failed
+        ? `Moved ${trashedIds.size} duplicate file` +
+            `${trashedIds.size === 1 ? "" : "s"} to Trash; ${failed} failed.`
+        : `Moved ${trashedIds.size} duplicate file` +
+            `${trashedIds.size === 1 ? "" : "s"} to Google Drive Trash.`,
+      failed ? "error" : "success"
+    );
+
+    await loadLibrary();
+  } finally {
+    state.duplicateCleaning = false;
+    renderDuplicateCleanup();
+    updateLibraryControls();
+    updateControls();
+    updateDriveImportControls();
+  }
+}
+
+/**
+ * Render duplicate scan progress, exact groups, and cleanup selection.
+ */
+function renderDuplicateCleanup() {
+  const hasState =
+    state.duplicateScanning ||
+    state.duplicateCleaning ||
+    Boolean(state.duplicateScanProgress) ||
+    state.duplicateGroups.length > 0;
+
+  elements.duplicateCleanup.hidden = !hasState;
+  if (!hasState) {
+    return;
+  }
+
+  elements.closeDuplicateCleanup.disabled =
+    isDuplicateMaintenanceBusy();
+  elements.cancelDuplicateScan.disabled =
+    !state.duplicateScanning;
+
+  elements.duplicateScanProgress.hidden =
+    !state.duplicateScanning;
+  elements.duplicateResults.hidden =
+    state.duplicateScanning || state.duplicateGroups.length === 0;
+
+  if (state.duplicateScanning) {
+    const progress = state.duplicateScanProgress || {};
+    elements.duplicateCleanupSummary.textContent =
+      "Scanning exact duplicates…";
+    elements.duplicateScanProgressBar.removeAttribute("value");
+
+    const rate = formatScanRate(
+      progress.booksScanned || 0,
+      progress.startedAt
+    ).replace("files/min", "books/min");
+    const elapsed = formatScanElapsed(progress.startedAt);
+
+    elements.duplicateScanProgressText.textContent =
+      `${progress.foldersScanned || 0} folders · ` +
+      `${progress.filesScanned || 0} files · ` +
+      `${progress.booksScanned || 0} books · ` +
+      `${progress.fingerprintedBooks || 0} checksummed · ` +
+      `${progress.duplicateGroups || 0} duplicate groups` +
+      (progress.folderErrors
+        ? ` · ${progress.folderErrors} folder errors`
+        : "") +
+      (rate ? ` · ${rate}` : "") +
+      (elapsed ? ` · ${elapsed}` : "") +
+      (progress.currentPath
+        ? ` · Current: ${progress.currentPath}`
+        : "");
+    return;
+  }
+
+  elements.duplicateScanProgressBar.value = 0;
+  elements.duplicateScanProgressText.textContent = "";
+
+  const groups = state.duplicateGroups;
+  const duplicateCopies = groups.reduce(
+    (sum, group) => sum + (group.files.length - 1),
+    0
+  );
+  const reclaimableBytes = groups.reduce(
+    (sum, group) =>
+      sum + (group.files[0]?.size || 0) * (group.files.length - 1),
+    0
+  );
+
+  elements.duplicateCleanupSummary.textContent =
+    groups.length > 0
+      ? `${groups.length} exact duplicate group` +
+        `${groups.length === 1 ? "" : "s"}`
+      : "Duplicate scan complete";
+
+  elements.duplicateResultsSummary.textContent =
+    `${duplicateCopies} duplicate cop` +
+    `${duplicateCopies === 1 ? "y" : "ies"} · ` +
+    `${formatBytes(reclaimableBytes)} reclaimable. ` +
+    "Only exact checksum matches are shown; cleanup moves files to Trash.";
+
+  elements.duplicateGroupList.replaceChildren();
+
+  for (const group of groups) {
+    elements.duplicateGroupList.append(
+      createDuplicateGroupElement(group)
+    );
+  }
+
+  const selectedCount = state.duplicateSelectedGroups.size;
+  elements.cleanSelectedDuplicates.disabled =
+    state.duplicateCleaning || selectedCount === 0;
+  elements.cleanSelectedDuplicates.textContent =
+    state.duplicateCleaning
+      ? "Cleaning duplicates…"
+      : selectedCount > 0
+        ? `Clean ${selectedCount} selected group` +
+          `${selectedCount === 1 ? "" : "s"}`
+        : "Move selected duplicates to Trash";
+
+  elements.selectAllDuplicates.disabled =
+    state.duplicateCleaning || groups.length === 0;
+  elements.clearDuplicateSelection.disabled =
+    state.duplicateCleaning || selectedCount === 0;
+}
+
+/**
+ * Build one exact-duplicate review group.
+ *
+ * @param {object} group
+ * @returns {HTMLLIElement}
+ */
+function createDuplicateGroupElement(group) {
+  const li = document.createElement("li");
+  li.className = "duplicate-group";
+
+  const header = document.createElement("label");
+  header.className = "duplicate-group-header";
+
+  const select = document.createElement("input");
+  select.type = "checkbox";
+  select.checked = state.duplicateSelectedGroups.has(group.id);
+  select.disabled = state.duplicateCleaning;
+  select.addEventListener("change", () => {
+    if (select.checked) {
+      state.duplicateSelectedGroups.add(group.id);
+    } else {
+      state.duplicateSelectedGroups.delete(group.id);
+    }
+    renderDuplicateCleanup();
+  });
+
+  const title = document.createElement("span");
+  title.className = "duplicate-group-title";
+  title.textContent =
+    group.files[0]?.name || "Exact duplicate";
+
+  header.append(select, title);
+
+  const meta = document.createElement("div");
+  meta.className = "duplicate-group-meta";
+  meta.textContent =
+    `${group.files.length} identical copies · ` +
+    `${formatBytes(group.files[0]?.size || 0)} each · ` +
+    `${formatBytes((group.files[0]?.size || 0) * (group.files.length - 1))} reclaimable`;
+
+  const copies = document.createElement("ul");
+  copies.className = "duplicate-copy-list";
+
+  const keepId =
+    state.duplicateKeepByGroup.get(group.id) ||
+    chooseDefaultDuplicateKeep(group);
+
+  for (const file of group.files) {
+    const row = document.createElement("li");
+    row.className = "duplicate-copy";
+
+    const keep = document.createElement("input");
+    keep.type = "radio";
+    keep.className = "duplicate-copy-keep";
+    keep.name = `duplicate-keep-${group.id}`;
+    keep.value = file.id;
+    keep.checked = file.id === keepId;
+    keep.disabled = state.duplicateCleaning;
+    keep.setAttribute("aria-label", `Keep ${file.path}`);
+    keep.addEventListener("change", () => {
+      if (keep.checked) {
+        state.duplicateKeepByGroup.set(group.id, file.id);
+        renderDuplicateCleanup();
+      }
+    });
+
+    const path = document.createElement("div");
+    path.className = "duplicate-copy-path";
+    path.textContent =
+      `${file.id === keepId ? "Keep · " : ""}${file.path}`;
+
+    const size = document.createElement("div");
+    size.className = "duplicate-copy-size";
+    size.textContent = file.modifiedTime
+      ? formatDateTime(file.modifiedTime)
+      : formatBytes(file.size || 0);
+
+    row.append(keep, path, size);
+    copies.append(row);
+  }
+
+  li.append(header, meta, copies);
+  return li;
+}
+
+/**
  * Return the current library folder ID.
  *
  * @returns {string}
@@ -3222,6 +3815,7 @@ function updateLibraryControls() {
   const ready =
     !state.busy &&
     !state.libraryLoading &&
+    !isDuplicateMaintenanceBusy() &&
     googleAuth.isConnected() &&
     Boolean(state.storage?.books?.id);
 
@@ -3232,6 +3826,18 @@ function updateLibraryControls() {
     state.libraryLoading
       ? "Refreshing…"
       : "Refresh";
+
+  elements.findDuplicates.disabled =
+    !ready ||
+    state.driveImporting ||
+    state.wholeFolderImporting;
+
+  elements.findDuplicates.textContent =
+    state.duplicateScanning
+      ? "Scanning…"
+      : state.duplicateCleaning
+        ? "Cleaning…"
+        : "Find duplicates";
 
   elements.libraryBack.disabled =
     !ready ||
@@ -4189,6 +4795,16 @@ function handleAuthEvent(event) {
   }
 
   if (event.type === "error") {
+    state.duplicateScanController?.abort();
+    state.duplicateScanController = null;
+    state.duplicateScanning = false;
+    state.duplicateScanProgress = null;
+    state.duplicateGroups = [];
+    state.duplicateSelectedGroups = new Set();
+    state.duplicateKeepByGroup = new Map();
+    state.duplicateCleaning = false;
+    renderDuplicateCleanup();
+
     state.storage = null;
     state.libraryBooks = [];
     state.libraryFolders = [];
@@ -4254,6 +4870,16 @@ function setLocalBookPickersDisabled(disabled) {
  * Reset auth-related UI to disconnected state.
  */
 function setDisconnectedState() {
+  state.duplicateScanController?.abort();
+  state.duplicateScanController = null;
+  state.duplicateScanning = false;
+  state.duplicateScanProgress = null;
+  state.duplicateGroups = [];
+  state.duplicateSelectedGroups = new Set();
+  state.duplicateKeepByGroup = new Map();
+  state.duplicateCleaning = false;
+  renderDuplicateCleanup();
+
   state.wholeFolderScanController?.abort();
   state.wholeFolderScanController = null;
   state.wholeFolderImportController?.abort();
@@ -4326,9 +4952,12 @@ function setBusy(busy) {
 function updateControls() {
   const destinationReady =
     !state.busy &&
+    !isDuplicateMaintenanceBusy() &&
     googleAuth.isConnected() &&
     Boolean(state.storage?.books?.id) &&
     !state.driveFoldersLoading;
+
+  setLocalBookPickersDisabled(!destinationReady);
 
   const canUpload =
     destinationReady &&

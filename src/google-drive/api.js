@@ -170,6 +170,7 @@ export class GoogleDriveApi {
           "nextPageToken," +
           "files(" +
           "id,name,mimeType,parents,appProperties,size,modifiedTime," +
+          "md5Checksum,sha1Checksum,sha256Checksum," +
           "capabilities(canCopy)," +
           "shortcutDetails(targetId,targetMimeType)" +
           ")",

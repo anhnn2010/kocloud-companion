@@ -2,13 +2,15 @@
 
 KOCloud Companion is the browser-based companion for KOCloud on KOReader.
 
-The initial V0.1 scope is intentionally small:
+Current Companion capabilities include:
 
 - connect to Google Drive with a user-owned Web OAuth client;
 - locate the existing KOCloud storage initialized by the KOReader plugin;
-- choose one EPUB or PDF;
-- upload it directly from the browser to `KOCloud/Books`;
-- show real upload progress.
+- upload individual books or preserve an entire local folder tree;
+- import Google Drive folders recursively with direct, bounded-concurrency execution;
+- choose duplicate behavior while importing;
+- browse `KOCloud/Books`;
+- scan the full KOCloud library for exact checksum duplicates and safely move selected copies to Google Drive Trash.
 
 ## Architecture
 
@@ -77,11 +79,12 @@ The `.nojekyll` file prevents unnecessary Jekyll processing.
 - No Google OAuth client secret belongs in this repository or in browser code.
 - Ebook data is uploaded directly from the browser to Google Drive.
 
-## Current limitation
+## Duplicate cleanup
 
-V0.1 uploads one EPUB/PDF at a time. Multi-file queueing, retry, duplicate
-handling, and library management are planned after this checkpoint is verified
-end-to-end.
+`Find duplicates` scans `KOCloud/Books` recursively using Drive-provided binary
+checksums. It does not download ebook content to calculate hashes. Only exact
+checksum matches are offered for cleanup, and cleanup moves non-kept copies to
+Google Drive Trash rather than permanently deleting them.
 
 ## Storage protocol
 

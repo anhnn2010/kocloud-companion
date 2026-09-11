@@ -479,14 +479,25 @@
           </p>
         </div>
 
-        <button
-          id="refresh-library"
-          type="button"
-          class="secondary-button compact-button"
-          disabled
-        >
-          Refresh
-        </button>
+        <div class="section-actions">
+          <button
+            id="find-duplicates"
+            type="button"
+            class="secondary-button compact-button"
+            disabled
+          >
+            Find duplicates
+          </button>
+
+          <button
+            id="refresh-library"
+            type="button"
+            class="secondary-button compact-button"
+            disabled
+          >
+            Refresh
+          </button>
+        </div>
       </div>
 
       <div
@@ -510,6 +521,93 @@
         >
           KOCloud / Books
         </div>
+      </div>
+
+      <div
+        id="duplicate-cleanup"
+        class="duplicate-cleanup"
+        hidden
+      >
+        <div class="queue-header">
+          <strong id="duplicate-cleanup-summary">
+            Duplicate scan
+          </strong>
+
+          <button
+            id="close-duplicate-cleanup"
+            type="button"
+            class="text-button"
+          >
+            Close
+          </button>
+        </div>
+
+        <div
+          id="duplicate-scan-progress"
+          class="progress-region duplicate-scan-progress"
+          hidden
+        >
+          <progress
+            id="duplicate-scan-progress-bar"
+            max="1"
+            value="0"
+          ></progress>
+          <span id="duplicate-scan-progress-text"></span>
+
+          <button
+            id="cancel-duplicate-scan"
+            type="button"
+            class="secondary-button compact-button"
+          >
+            Cancel scan
+          </button>
+        </div>
+
+        <div
+          id="duplicate-results"
+          class="duplicate-results"
+          hidden
+        >
+          <p id="duplicate-results-summary" class="help-text"></p>
+
+          <div class="duplicate-result-actions">
+            <button
+              id="select-all-duplicates"
+              type="button"
+              class="text-button"
+            >
+              Select all groups
+            </button>
+
+            <button
+              id="clear-duplicate-selection"
+              type="button"
+              class="text-button"
+            >
+              Clear selection
+            </button>
+          </div>
+
+          <ul
+            id="duplicate-group-list"
+            class="duplicate-group-list"
+          ></ul>
+
+          <button
+            id="clean-selected-duplicates"
+            type="button"
+            class="primary-button full-width"
+            disabled
+          >
+            Move selected duplicates to Trash
+          </button>
+        </div>
+
+        <p
+          id="duplicate-cleanup-message"
+          class="message"
+          aria-live="polite"
+        ></p>
       </div>
 
       <div id="library-register-controls" hidden>

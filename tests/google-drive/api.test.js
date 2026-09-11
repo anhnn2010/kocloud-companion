@@ -54,6 +54,14 @@ test("Drive folder entries use one large-page child listing", async () => {
       /capabilities\(canCopy\)/
     );
     assert.match(
+      requestUrl.searchParams.get("fields"),
+      /sha256Checksum/
+    );
+    assert.match(
+      requestUrl.searchParams.get("fields"),
+      /md5Checksum/
+    );
+    assert.match(
       requestUrl.searchParams.get("q"),
       /'parent' in parents/
     );

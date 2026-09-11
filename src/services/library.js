@@ -97,6 +97,19 @@ export class LibraryService {
   }
 
   /**
+   * Move one library file to Google Drive Trash.
+   *
+   * @param {string} fileId
+   * @returns {Promise<object>}
+   */
+  async trashFile(fileId) {
+    return this.driveApi.trashFile(
+      this.#requireAccessToken(),
+      fileId
+    );
+  }
+
+  /**
    * List one KOCloud library folder for browsing.
    *
    * @param {string} folderId
