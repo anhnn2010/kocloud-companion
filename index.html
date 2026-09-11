@@ -570,6 +570,27 @@
         >
           <p id="duplicate-results-summary" class="help-text"></p>
 
+          <div class="duplicate-policy-panel">
+            <label for="duplicate-keeper-policy">
+              Keep which copy?
+            </label>
+            <select id="duplicate-keeper-policy">
+              <option value="shortest-path">
+                Prefer the shortest path
+              </option>
+              <option value="oldest">
+                Prefer the oldest copy
+              </option>
+              <option value="newest">
+                Prefer the newest copy
+              </option>
+            </select>
+            <p class="help-text">
+              The rule is applied to every exact-duplicate group. You can
+              override the keeper for any group shown in the preview.
+            </p>
+          </div>
+
           <div class="duplicate-result-actions">
             <button
               id="select-all-duplicates"
@@ -585,6 +606,26 @@
               class="text-button"
             >
               Clear selection
+            </button>
+          </div>
+
+          <div class="duplicate-preview-navigation">
+            <button
+              id="duplicate-preview-previous"
+              type="button"
+              class="secondary-button compact-button"
+            >
+              ← Previous
+            </button>
+
+            <span id="duplicate-preview-page" class="help-text"></span>
+
+            <button
+              id="duplicate-preview-next"
+              type="button"
+              class="secondary-button compact-button"
+            >
+              Next →
             </button>
           </div>
 

@@ -966,3 +966,51 @@ progress {
     white-space: normal;
   }
 }
+
+.duplicate-policy-panel {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.duplicate-policy-panel label {
+  font-weight: 700;
+}
+
+.duplicate-policy-panel select {
+  width: 100%;
+  max-width: 420px;
+}
+
+.duplicate-policy-panel .help-text {
+  margin: 0;
+}
+
+.duplicate-preview-navigation {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  margin: 10px 0 12px;
+}
+
+#duplicate-preview-page {
+  margin: 0;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 520px) {
+  .duplicate-preview-navigation {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  #duplicate-preview-page {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+}

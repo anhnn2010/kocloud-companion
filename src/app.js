@@ -9,6 +9,11 @@ import { ImportPlanner } from "./imports/planner.js";
 import { ImportExecutor } from "./imports/executor.js";
 import { DuplicateScanner } from "./library/duplicate-scanner.js";
 import {
+  DUPLICATE_KEEP_POLICIES,
+  chooseDuplicateKeep,
+  paginateDuplicateGroups,
+} from "./library/duplicate-policy.js";
+import {
   createAvailableBookName,
   normalizeBookName,
 } from "./core/book-names.js";
@@ -167,6 +172,14 @@ const elements = {
     document.getElementById("duplicate-results"),
   duplicateResultsSummary:
     document.getElementById("duplicate-results-summary"),
+  duplicateKeeperPolicy:
+    document.getElementById("duplicate-keeper-policy"),
+  duplicatePreviewPrevious:
+    document.getElementById("duplicate-preview-previous"),
+  duplicatePreviewNext:
+    document.getElementById("duplicate-preview-next"),
+  duplicatePreviewPage:
+    document.getElementById("duplicate-preview-page"),
   selectAllDuplicates:
     document.getElementById("select-all-duplicates"),
   clearDuplicateSelection:
@@ -209,6 +222,9 @@ const state = {
   duplicateGroups: [],
   duplicateSelectedGroups: new Set(),
   duplicateKeepByGroup: new Map(),
+  duplicateKeeperPolicy: DUPLICATE_KEEP_POLICIES.SHORTEST_PATH,
+  duplicatePreviewPage: 0,
+  duplicatePreviewPageSize: 20,
   duplicateCleaning: false,
   driveSourceFolder: null,
   driveSourceFolderPicking: false,
@@ -327,6 +343,21 @@ function init() {
   elements.selectAllDuplicates.addEventListener(
     "click",
     handleSelectAllDuplicateGroups
+  );
+
+  elements.duplicateKeeperPolicy.addEventListener(
+    "change",
+    handleDuplicateKeeperPolicyChange
+  );
+
+  elements.duplicatePreviewPrevious.addEventListener(
+    "click",
+    () => handleDuplicatePreviewPageChange(-1)
+  );
+
+  elements.duplicatePreviewNext.addEventListener(
+    "click",
+    () => handleDuplicatePreviewPageChange(1)
   );
 
   elements.clearDuplicateSelection.addEventListener(
@@ -2928,6 +2959,7 @@ async function handleFindDuplicates() {
   state.duplicateGroups = [];
   state.duplicateSelectedGroups = new Set();
   state.duplicateKeepByGroup = new Map();
+  state.duplicatePreviewPage = 0;
 
   clearMessage(elements.duplicateCleanupMessage);
   renderDuplicateCleanup();
@@ -2961,12 +2993,11 @@ async function handleFindDuplicates() {
       startedAt: state.duplicateScanProgress?.startedAt || Date.now(),
     };
 
-    for (const group of result.groups) {
-      const keepId = chooseDefaultDuplicateKeep(group);
-      if (keepId) {
-        state.duplicateKeepByGroup.set(group.id, keepId);
-      }
-    }
+    state.duplicatePreviewPage = 0;
+    state.duplicateSelectedGroups = new Set(
+      result.groups.map((group) => group.id)
+    );
+    applyDuplicateKeeperPolicy();
 
     if (result.groups.length === 0) {
       setMessage(
@@ -3021,6 +3052,7 @@ function handleCloseDuplicateCleanup() {
   state.duplicateScanProgress = null;
   state.duplicateSelectedGroups = new Set();
   state.duplicateKeepByGroup = new Map();
+  state.duplicatePreviewPage = 0;
   clearMessage(elements.duplicateCleanupMessage);
   renderDuplicateCleanup();
 }
@@ -3052,30 +3084,54 @@ function handleClearDuplicateSelection() {
 }
 
 /**
- * Pick the safest default file to keep: the oldest copy, then path order.
- * Exact duplicates have identical content, so this only chooses which Drive
- * placement survives when the user opts to clean the group.
- *
- * @param {object} group
- * @returns {string|null}
+ * Recompute automatic keepers for every duplicate group using the current rule.
  */
-function chooseDefaultDuplicateKeep(group) {
-  const files = [...(group.files || [])];
-  files.sort((left, right) => {
-    const leftTime = Date.parse(left.modifiedTime || "") || 0;
-    const rightTime = Date.parse(right.modifiedTime || "") || 0;
-
-    if (leftTime !== rightTime) {
-      return leftTime - rightTime;
-    }
-
-    return String(left.path || "").localeCompare(
-      String(right.path || ""),
-      undefined,
-      { sensitivity: "base", numeric: true }
+function applyDuplicateKeeperPolicy() {
+  state.duplicateKeepByGroup = new Map();
+  for (const group of state.duplicateGroups) {
+    const keepId = chooseDuplicateKeep(
+      group,
+      state.duplicateKeeperPolicy
     );
-  });
-  return files[0]?.id || null;
+    if (keepId) {
+      state.duplicateKeepByGroup.set(group.id, keepId);
+    }
+  }
+}
+
+/**
+ * Change the keeper rule for all exact duplicate groups.
+ */
+function handleDuplicateKeeperPolicyChange() {
+  if (isDuplicateMaintenanceBusy()) {
+    return;
+  }
+
+  state.duplicateKeeperPolicy =
+    elements.duplicateKeeperPolicy.value ||
+    DUPLICATE_KEEP_POLICIES.SHORTEST_PATH;
+  state.duplicatePreviewPage = 0;
+  applyDuplicateKeeperPolicy();
+  renderDuplicateCleanup();
+}
+
+/**
+ * Move the paginated duplicate preview backward or forward.
+ *
+ * @param {number} delta
+ */
+function handleDuplicatePreviewPageChange(delta) {
+  if (isDuplicateMaintenanceBusy()) {
+    return;
+  }
+
+  const page = paginateDuplicateGroups(
+    state.duplicateGroups,
+    state.duplicatePreviewPage + delta,
+    state.duplicatePreviewPageSize
+  );
+  state.duplicatePreviewPage = page.pageIndex;
+  renderDuplicateCleanup();
 }
 
 /**
@@ -3098,7 +3154,7 @@ async function handleCleanSelectedDuplicates() {
   for (const group of selectedGroups) {
     const keepId =
       state.duplicateKeepByGroup.get(group.id) ||
-      chooseDefaultDuplicateKeep(group);
+      chooseDuplicateKeep(group, state.duplicateKeeperPolicy);
 
     for (const file of group.files || []) {
       if (file.id !== keepId) {
@@ -3108,6 +3164,22 @@ async function handleCleanSelectedDuplicates() {
   }
 
   if (tasks.length === 0) {
+    return;
+  }
+
+  const reclaimableBytes = tasks.reduce(
+    (sum, task) => sum + (task.file.size || 0),
+    0
+  );
+  const confirmed = window.confirm(
+    `Move ${tasks.length} exact duplicate file` +
+      `${tasks.length === 1 ? "" : "s"} to Google Drive Trash?\n\n` +
+      `${selectedGroups.length} group` +
+      `${selectedGroups.length === 1 ? "" : "s"} · ` +
+      `${formatBytes(reclaimableBytes)} reclaimable\n\n` +
+      "One copy from every group will be kept. Nothing is permanently deleted."
+  );
+  if (!confirmed) {
     return;
   }
 
@@ -3183,7 +3255,7 @@ async function handleCleanSelectedDuplicates() {
       if (!group.files.some((file) => file.id === currentKeep)) {
         state.duplicateKeepByGroup.set(
           group.id,
-          chooseDefaultDuplicateKeep(group)
+          chooseDuplicateKeep(group, state.duplicateKeeperPolicy)
         );
       }
     }
@@ -3286,11 +3358,31 @@ function renderDuplicateCleanup() {
     `${duplicateCopies} duplicate cop` +
     `${duplicateCopies === 1 ? "y" : "ies"} · ` +
     `${formatBytes(reclaimableBytes)} reclaimable. ` +
-    "Only exact checksum matches are shown; cleanup moves files to Trash.";
+    "All exact groups are selected by default. Only checksum-identical files " +
+    "are eligible; cleanup moves extra copies to Trash.";
+
+  elements.duplicateKeeperPolicy.value = state.duplicateKeeperPolicy;
+  elements.duplicateKeeperPolicy.disabled = state.duplicateCleaning;
+
+  const page = paginateDuplicateGroups(
+    groups,
+    state.duplicatePreviewPage,
+    state.duplicatePreviewPageSize
+  );
+  state.duplicatePreviewPage = page.pageIndex;
+  elements.duplicatePreviewPage.textContent =
+    groups.length > 0
+      ? `Showing ${page.start + 1}-${page.end} of ${page.totalItems}` +
+        ` · Page ${page.pageIndex + 1}/${page.totalPages}`
+      : "";
+  elements.duplicatePreviewPrevious.disabled =
+    state.duplicateCleaning || page.pageIndex <= 0;
+  elements.duplicatePreviewNext.disabled =
+    state.duplicateCleaning || page.pageIndex >= page.totalPages - 1;
 
   elements.duplicateGroupList.replaceChildren();
 
-  for (const group of groups) {
+  for (const group of page.items) {
     elements.duplicateGroupList.append(
       createDuplicateGroupElement(group)
     );
@@ -3303,9 +3395,9 @@ function renderDuplicateCleanup() {
     state.duplicateCleaning
       ? "Cleaning duplicates…"
       : selectedCount > 0
-        ? `Clean ${selectedCount} selected group` +
+        ? `Clean ${selectedCount} exact duplicate group` +
           `${selectedCount === 1 ? "" : "s"}`
-        : "Move selected duplicates to Trash";
+        : "Move exact duplicates to Trash";
 
   elements.selectAllDuplicates.disabled =
     state.duplicateCleaning || groups.length === 0;
@@ -4804,6 +4896,7 @@ function handleAuthEvent(event) {
     state.duplicateGroups = [];
     state.duplicateSelectedGroups = new Set();
     state.duplicateKeepByGroup = new Map();
+    state.duplicatePreviewPage = 0;
     state.duplicateCleaning = false;
     renderDuplicateCleanup();
 
@@ -4879,6 +4972,7 @@ function setDisconnectedState() {
   state.duplicateGroups = [];
   state.duplicateSelectedGroups = new Set();
   state.duplicateKeepByGroup = new Map();
+  state.duplicatePreviewPage = 0;
   state.duplicateCleaning = false;
   renderDuplicateCleanup();
 
