@@ -10,68 +10,42 @@ export class LibraryService {
   /**
    * @param {object} options
    * @param {object} options.driveApi
-   * @param {() => string|null} options.getAccessToken
+   * @param {() => string|null|Promise<string|null>} options.getAccessToken
+   * @param {() => string|Promise<string>} [options.refreshAccessToken]
    */
-  constructor({ driveApi, getAccessToken }) {
+  constructor({
+    driveApi,
+    getAccessToken,
+    refreshAccessToken = null,
+  }) {
     this.driveApi = driveApi;
     this.getAccessToken = getAccessToken;
+    this.refreshAccessToken = refreshAccessToken;
   }
 
-  /**
-   * Resolve the existing KOCloud root and Books folder.
-   *
-   * @param {string|null} accessToken
-   * @returns {Promise<{root: object, books: object}>}
-   */
   async resolveStorage(accessToken = null) {
-    return this.driveApi.resolveBooksStorage(
-      this.#requireAccessToken(accessToken)
+    return this.#withAccessToken(
+      (token) => this.driveApi.resolveBooksStorage(token),
+      accessToken
     );
   }
 
-  /**
-   * List direct child folders under one library folder.
-   *
-   * @param {string} folderId
-   * @returns {Promise<Array<object>>}
-   */
   async listFolders(folderId) {
-    return this.driveApi.listChildFolders(
-      this.#requireAccessToken(),
-      folderId
+    return this.#withAccessToken((token) =>
+      this.driveApi.listChildFolders(token, folderId)
     );
   }
 
-  /**
-   * List all direct non-folder files for duplicate detection.
-   *
-   * @param {string} folderId
-   * @returns {Promise<Array<object>>}
-   */
   async listFiles(folderId) {
-    return this.driveApi.listBooksInFolder(
-      this.#requireAccessToken(),
-      folderId
+    return this.#withAccessToken((token) =>
+      this.driveApi.listBooksInFolder(token, folderId)
     );
   }
 
-
-  /**
-   * List direct folders and files in one request when the provider supports it.
-   * Falls back to the older two-call interface for test doubles/providers that
-   * have not implemented the combined operation yet.
-   *
-   * @param {string} folderId
-   * @returns {Promise<{folders: Array<object>, files: Array<object>}>}
-   */
   async listEntries(folderId) {
-    if (
-      typeof this.driveApi.listFolderEntries ===
-      "function"
-    ) {
-      return this.driveApi.listFolderEntries(
-        this.#requireAccessToken(),
-        folderId
+    if (typeof this.driveApi.listFolderEntries === "function") {
+      return this.#withAccessToken((token) =>
+        this.driveApi.listFolderEntries(token, folderId)
       );
     }
 
@@ -83,38 +57,18 @@ export class LibraryService {
     return { folders, files };
   }
 
-  /**
-   * List KOCloud-managed books in one folder.
-   *
-   * @param {string} folderId
-   * @returns {Promise<Array<object>>}
-   */
   async listManagedBooks(folderId) {
-    return this.driveApi.listManagedBooks(
-      this.#requireAccessToken(),
-      folderId
+    return this.#withAccessToken((token) =>
+      this.driveApi.listManagedBooks(token, folderId)
     );
   }
 
-  /**
-   * Move one library file to Google Drive Trash.
-   *
-   * @param {string} fileId
-   * @returns {Promise<object>}
-   */
   async trashFile(fileId) {
-    return this.driveApi.trashFile(
-      this.#requireAccessToken(),
-      fileId
+    return this.#withAccessToken((token) =>
+      this.driveApi.trashFile(token, fileId)
     );
   }
 
-  /**
-   * List one KOCloud library folder for browsing.
-   *
-   * @param {string} folderId
-   * @returns {Promise<{folders: Array<object>, books: Array<object>}>}
-   */
   async listFolder(folderId) {
     const [folders, books] = await Promise.all([
       this.listFolders(folderId),
@@ -124,130 +78,116 @@ export class LibraryService {
     return { folders, books };
   }
 
-  /**
-   * Create a child folder inside the KOCloud Books library.
-   *
-   * @param {string} parentFolderId
-   * @param {string} name
-   * @returns {Promise<object>}
-   */
   async createFolder(parentFolderId, name) {
-    return this.driveApi.createBookFolder(
-      this.#requireAccessToken(),
-      parentFolderId,
-      name
+    return this.#withAccessToken((token) =>
+      this.driveApi.createBookFolder(
+        token,
+        parentFolderId,
+        name
+      )
     );
   }
 
-  /**
-   * Return whether a selected file uses a supported KOReader book format.
-   *
-   * @param {{name: string}} file
-   * @returns {boolean}
-   */
   isSupportedBook(file) {
     return this.driveApi.isSupportedBook(file);
   }
 
-  /**
-   * Return the MIME type used for uploading one book.
-   *
-   * @param {File} file
-   * @returns {string}
-   */
   getBookMimeType(file) {
     return this.driveApi.getBookMimeType(file);
   }
 
-  /**
-   * Create a resumable session for a new KOCloud book.
-   *
-   * @param {File} file
-   * @param {string} destinationFolderId
-   * @param {string} driveName
-   * @returns {Promise<string>}
-   */
   async createUploadSession(
     file,
     destinationFolderId,
     driveName = file.name,
     { isBook = true } = {}
   ) {
-    return this.driveApi.createBookUploadSession(
-      this.#requireAccessToken(),
-      file,
-      destinationFolderId,
-      driveName,
-      { isBook }
+    return this.#withAccessToken((token) =>
+      this.driveApi.createBookUploadSession(
+        token,
+        file,
+        destinationFolderId,
+        driveName,
+        { isBook }
+      )
     );
   }
 
-  /**
-   * Create a resumable session that replaces an existing book's content.
-   *
-   * @param {File} file
-   * @param {string} existingFileId
-   * @returns {Promise<string>}
-   */
   async createReplaceSession(file, existingFileId) {
-    return this.driveApi.createBookReplaceSession(
-      this.#requireAccessToken(),
-      file,
-      existingFileId
+    return this.#withAccessToken((token) =>
+      this.driveApi.createBookReplaceSession(
+        token,
+        file,
+        existingFileId
+      )
     );
   }
 
-  /**
-   * Read registration metadata for an existing Drive book.
-   *
-   * Registration is currently hidden in the UI, but keeping this domain
-   * operation here prevents legacy code from reaching into Drive API directly.
-   *
-   * @param {string} fileId
-   * @returns {Promise<object>}
-   */
   async getRegistrationSource(fileId) {
-    return this.driveApi.getBookRegistrationSource(
-      this.#requireAccessToken(),
-      fileId
+    return this.#withAccessToken((token) =>
+      this.driveApi.getBookRegistrationSource(token, fileId)
     );
   }
 
-  /**
-   * Register an existing file as a KOCloud-managed book.
-   *
-   * @param {string} fileId
-   * @param {object} existingAppProperties
-   * @returns {Promise<object>}
-   */
   async registerExistingBook(
     fileId,
     existingAppProperties = {}
   ) {
-    return this.driveApi.registerExistingBook(
-      this.#requireAccessToken(),
-      fileId,
-      existingAppProperties
+    return this.#withAccessToken((token) =>
+      this.driveApi.registerExistingBook(
+        token,
+        fileId,
+        existingAppProperties
+      )
     );
   }
 
   /**
-   * Return an access token or fail with one consistent service-level error.
-   *
-   * @param {string|null} explicitToken
-   * @returns {string}
+   * Run one provider operation with a current token. If Drive rejects the
+   * token with 401, refresh once and retry the same operation. This catches
+   * revocation/expiry races that can happen between proactive refresh checks
+   * and the actual network request.
    */
-  #requireAccessToken(explicitToken = null) {
-    const accessToken =
-      explicitToken || this.getAccessToken();
+  async #withAccessToken(operation, explicitToken = null) {
+    const token = explicitToken || (await this.getAccessToken());
 
-    if (!accessToken) {
-      throw new Error(
+    if (!token) {
+      const authError = new Error(
         "Google authorization is no longer available. " +
           "Connect Google Drive again."
       );
+      authError.code = "GOOGLE_AUTH_REQUIRED";
+      throw authError;
     }
 
-    return accessToken;
+    try {
+      return await operation(token);
+    } catch (error) {
+      if (
+        error?.status !== 401 ||
+        typeof this.refreshAccessToken !== "function"
+      ) {
+        throw error;
+      }
+
+      let refreshedToken;
+      try {
+        refreshedToken = await this.refreshAccessToken();
+      } catch (refreshError) {
+        refreshError.code =
+          refreshError.code || "GOOGLE_AUTH_REQUIRED";
+        throw refreshError;
+      }
+
+      if (!refreshedToken) {
+        const authError = new Error(
+          "Google authorization expired. Connect Google Drive again."
+        );
+        authError.code = "GOOGLE_AUTH_REQUIRED";
+        throw authError;
+      }
+
+      return operation(refreshedToken);
+    }
   }
 }

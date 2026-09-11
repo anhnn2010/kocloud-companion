@@ -427,7 +427,10 @@ export class ImportExecutor {
           ),
         ]);
     } catch (error) {
-      if (error?.name === "AbortError") {
+      if (
+        error?.name === "AbortError" ||
+        isAuthenticationError(error)
+      ) {
         throw error;
       }
 
@@ -518,7 +521,10 @@ export class ImportExecutor {
           );
         }
       } catch (error) {
-        if (error?.name === "AbortError") {
+        if (
+          error?.name === "AbortError" ||
+          isAuthenticationError(error)
+        ) {
           throw error;
         }
 
@@ -919,6 +925,13 @@ export class ImportExecutor {
  *
  * @param {AbortSignal|undefined} signal
  */
+function isAuthenticationError(error) {
+  return (
+    error?.code === "GOOGLE_AUTH_REQUIRED" ||
+    error?.status === 401
+  );
+}
+
 function throwIfAborted(signal) {
   if (!signal?.aborted) {
     return;

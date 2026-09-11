@@ -508,3 +508,41 @@ test("direct replace keeps cleanup adjacent and bounds folder work", async () =>
   assert.ok(firstTrashIndex >= 0);
   assert.ok(copiesBeforeFirstTrash <= 2);
 });
+
+test("direct whole-folder import stops on authentication failure", async () => {
+  const authError = new Error("Google authorization expired");
+  authError.code = "GOOGLE_AUTH_REQUIRED";
+
+  const executor = new ImportExecutor({
+    source: {
+      async listEntries() {
+        throw authError;
+      },
+      isBook() {
+        return true;
+      },
+    },
+    libraryService: {
+      async listEntries() {
+        return { folders: [], files: [] };
+      },
+      async createFolder(_parentId, name) {
+        return { id: `dest-${name}`, name };
+      },
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      executor.importWholeFolderDirect(
+        {
+          sourceFolder: { id: "source", name: "Source" },
+          destinationFolderId: "books",
+          destinationPath: "KOCloud/Books",
+        },
+        "skip",
+        { maxConcurrency: 2 }
+      ),
+    (error) => error.code === "GOOGLE_AUTH_REQUIRED"
+  );
+});

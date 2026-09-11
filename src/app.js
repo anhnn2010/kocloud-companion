@@ -31,12 +31,14 @@ import {
 
 const libraryService = new LibraryService({
   driveApi: googleDriveApi,
-  getAccessToken: () => googleAuth.getAccessToken(),
+  getAccessToken: () => googleAuth.getValidAccessToken(),
+  refreshAccessToken: () => googleAuth.refreshAccessToken(),
 });
 
 const driveImportSource = new GoogleDriveImportSource({
   driveApi: googleDriveApi,
-  getAccessToken: () => googleAuth.getAccessToken(),
+  getAccessToken: () => googleAuth.getValidAccessToken(),
+  refreshAccessToken: () => googleAuth.refreshAccessToken(),
   isSupportedBook: (file) =>
     libraryService.isSupportedBook(file),
 });

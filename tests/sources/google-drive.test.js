@@ -213,3 +213,34 @@ test("Drive source copies recognized and other files with correct role intent", 
   assert.equal(calls[0][4].isBook, true);
   assert.equal(calls[1][4].isBook, false);
 });
+
+test("Drive source refreshes and retries one source request after 401", async () => {
+  const tokens = [];
+  let refreshes = 0;
+  const authError = new Error("Invalid Credentials");
+  authError.status = 401;
+
+  const source = new GoogleDriveImportSource({
+    driveApi: {
+      async listFolderEntries(token) {
+        tokens.push(token);
+        if (token === "expired-token") {
+          throw authError;
+        }
+        return { folders: [], files: [] };
+      },
+    },
+    getAccessToken: async () => "expired-token",
+    refreshAccessToken: async () => {
+      refreshes += 1;
+      return "fresh-token";
+    },
+    isSupportedBook: () => true,
+  });
+
+  const entries = await source.listEntries("root");
+
+  assert.deepEqual(entries, { folders: [], files: [] });
+  assert.equal(refreshes, 1);
+  assert.deepEqual(tokens, ["expired-token", "fresh-token"]);
+});

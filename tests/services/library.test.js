@@ -110,3 +110,33 @@ test("library service fails consistently without auth", async () => {
     /Connect Google Drive again/
   );
 });
+
+test("library service refreshes once and retries after Drive 401", async () => {
+  const tokens = [];
+  let refreshes = 0;
+  const authError = new Error("Invalid Credentials");
+  authError.status = 401;
+
+  const service = new LibraryService({
+    driveApi: {
+      async listChildFolders(token) {
+        tokens.push(token);
+        if (token === "expired-token") {
+          throw authError;
+        }
+        return [{ id: "child", name: "Child" }];
+      },
+    },
+    getAccessToken: async () => "expired-token",
+    refreshAccessToken: async () => {
+      refreshes += 1;
+      return "fresh-token";
+    },
+  });
+
+  const folders = await service.listFolders("books");
+
+  assert.equal(folders.length, 1);
+  assert.equal(refreshes, 1);
+  assert.deepEqual(tokens, ["expired-token", "fresh-token"]);
+});

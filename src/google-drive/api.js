@@ -137,10 +137,13 @@ async function throwDriveError(response, action) {
     detail = await response.text();
   }
 
-  throw new Error(
+  const error = new Error(
     `${action} failed (${response.status})` +
       (detail ? `: ${detail}` : "")
   );
+  error.status = response.status;
+  error.driveAction = action;
+  throw error;
 }
 
 /**

@@ -12,16 +12,19 @@ export class GoogleDriveImportSource {
   /**
    * @param {object} options
    * @param {object} options.driveApi
-   * @param {() => string|null} options.getAccessToken
+   * @param {() => string|null|Promise<string|null>} options.getAccessToken
+   * @param {() => string|Promise<string>} [options.refreshAccessToken]
    * @param {(file: object) => boolean} options.isSupportedBook
    */
   constructor({
     driveApi,
     getAccessToken,
+    refreshAccessToken = null,
     isSupportedBook,
   }) {
     this.driveApi = driveApi;
     this.getAccessToken = getAccessToken;
+    this.refreshAccessToken = refreshAccessToken;
     this.isSupportedBook = isSupportedBook;
   }
 
@@ -32,9 +35,8 @@ export class GoogleDriveImportSource {
    * @returns {Promise<Array<object>>}
    */
   async listFolders(folderId) {
-    return this.driveApi.listChildFolders(
-      this.#requireAccessToken(),
-      folderId
+    return this.#withAccessToken((token) =>
+      this.driveApi.listChildFolders(token, folderId)
     );
   }
 
@@ -45,9 +47,8 @@ export class GoogleDriveImportSource {
    * @returns {Promise<Array<object>>}
    */
   async listFiles(folderId) {
-    return this.driveApi.listBooksInFolder(
-      this.#requireAccessToken(),
-      folderId
+    return this.#withAccessToken((token) =>
+      this.driveApi.listBooksInFolder(token, folderId)
     );
   }
 
@@ -63,9 +64,8 @@ export class GoogleDriveImportSource {
       typeof this.driveApi.listFolderEntries ===
       "function"
     ) {
-      return this.driveApi.listFolderEntries(
-        this.#requireAccessToken(),
-        folderId
+      return this.#withAccessToken((token) =>
+        this.driveApi.listFolderEntries(token, folderId)
       );
     }
 
@@ -109,9 +109,8 @@ export class GoogleDriveImportSource {
    * @returns {Promise<object>}
    */
   async getFile(fileId) {
-    return this.driveApi.getImportSource(
-      this.#requireAccessToken(),
-      fileId
+    return this.#withAccessToken((token) =>
+      this.driveApi.getImportSource(token, fileId)
     );
   }
 
@@ -128,16 +127,18 @@ export class GoogleDriveImportSource {
     destinationFolderId,
     driveName
   ) {
-    return this.driveApi.copyBookToFolder(
-      this.#requireAccessToken(),
-      fileId,
-      destinationFolderId,
-      driveName,
-      {
-        isBook: this.isSupportedBook({
-          name: driveName,
-        }),
-      }
+    return this.#withAccessToken((token) =>
+      this.driveApi.copyBookToFolder(
+        token,
+        fileId,
+        destinationFolderId,
+        driveName,
+        {
+          isBook: this.isSupportedBook({
+            name: driveName,
+          }),
+        }
+      )
     );
   }
 
@@ -148,9 +149,8 @@ export class GoogleDriveImportSource {
    * @returns {Promise<object>}
    */
   async trashFile(fileId) {
-    return this.driveApi.trashFile(
-      this.#requireAccessToken(),
-      fileId
+    return this.#withAccessToken((token) =>
+      this.driveApi.trashFile(token, fileId)
     );
   }
 
@@ -299,21 +299,50 @@ export class GoogleDriveImportSource {
   }
 
   /**
-   * Return an access token or fail consistently.
-   *
-   * @returns {string}
+   * Run one source-side Drive operation with a current token and retry once
+   * after an authentication refresh if Drive returns 401.
    */
-  #requireAccessToken() {
-    const accessToken = this.getAccessToken();
+  async #withAccessToken(operation) {
+    const token = await this.getAccessToken();
 
-    if (!accessToken) {
-      throw new Error(
+    if (!token) {
+      const authError = new Error(
         "Google authorization is no longer available. " +
           "Connect Google Drive again."
       );
+      authError.code = "GOOGLE_AUTH_REQUIRED";
+      throw authError;
     }
 
-    return accessToken;
+    try {
+      return await operation(token);
+    } catch (error) {
+      if (
+        error?.status !== 401 ||
+        typeof this.refreshAccessToken !== "function"
+      ) {
+        throw error;
+      }
+
+      let refreshedToken;
+      try {
+        refreshedToken = await this.refreshAccessToken();
+      } catch (refreshError) {
+        refreshError.code =
+          refreshError.code || "GOOGLE_AUTH_REQUIRED";
+        throw refreshError;
+      }
+
+      if (!refreshedToken) {
+        const authError = new Error(
+          "Google authorization expired. Connect Google Drive again."
+        );
+        authError.code = "GOOGLE_AUTH_REQUIRED";
+        throw authError;
+      }
+
+      return operation(refreshedToken);
+    }
   }
 }
 

@@ -1,5 +1,7 @@
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive";
 const CLIENT_ID_STORAGE_KEY = "kocloud_google_web_client_id";
+const DEFAULT_TOKEN_LIFETIME_MS = 55 * 60 * 1000;
+const TOKEN_REFRESH_SKEW_MS = 2 * 60 * 1000;
 
 /**
  * Google OAuth helper for KOCloud Companion.
@@ -15,23 +17,17 @@ export class GoogleAuth {
   constructor() {
     this.tokenClient = null;
     this.accessToken = null;
+    this.accessTokenExpiresAt = 0;
+    this.pendingTokenRequest = null;
     this.listeners = new Set();
   }
 
-  /**
-   * Return the Web OAuth Client ID saved in this browser.
-   *
-   * @returns {string}
-   */
+  /** Return the Web OAuth Client ID saved in this browser. */
   getClientId() {
     return localStorage.getItem(CLIENT_ID_STORAGE_KEY) || "";
   }
 
-  /**
-   * Save the Web OAuth Client ID in this browser.
-   *
-   * @param {string} clientId
-   */
+  /** Save the Web OAuth Client ID in this browser. */
   saveClientId(clientId) {
     const normalized = clientId.trim();
 
@@ -40,8 +36,6 @@ export class GoogleAuth {
     }
 
     localStorage.setItem(CLIENT_ID_STORAGE_KEY, normalized);
-
-    // Rebuild the GIS token client next time Connect is pressed.
     this.tokenClient = null;
     this.clearAccessToken();
 
@@ -51,41 +45,78 @@ export class GoogleAuth {
     });
   }
 
-  /**
-   * Return whether this page currently has a Google access token.
-   *
-   * @returns {boolean}
-   */
+  /** Return whether this page currently has Google authorization state. */
   isConnected() {
     return Boolean(this.accessToken);
   }
 
-  /**
-   * Return the current in-memory access token.
-   *
-   * @returns {string|null}
-   */
+  /** Return the current in-memory access token without refreshing it. */
   getAccessToken() {
     return this.accessToken;
   }
 
+  /** Return the known expiry time for the current token. */
+  getAccessTokenExpiresAt() {
+    return this.accessTokenExpiresAt;
+  }
+
   /**
-   * Remove the access token from memory.
+   * Return a token that is expected to remain valid for the next operation.
+   *
+   * Long-running imports call this through the Drive service boundary. When
+   * the current token is close to expiry, GIS is asked for a new token with an
+   * empty prompt so an already-authorized Google session can continue without
+   * another consent screen.
    */
+  async getValidAccessToken({
+    minValidityMs = TOKEN_REFRESH_SKEW_MS,
+  } = {}) {
+    if (!this.accessToken) {
+      return null;
+    }
+
+    if (
+      this.accessTokenExpiresAt >
+      Date.now() + Math.max(0, minValidityMs)
+    ) {
+      return this.accessToken;
+    }
+
+    return this.refreshAccessToken();
+  }
+
+  /**
+   * Force GIS to issue a fresh access token for the existing authorization.
+   * Concurrent callers share one refresh so four import workers do not open
+   * four token requests at the same time.
+   */
+  async refreshAccessToken() {
+    if (!this.accessToken) {
+      throw new Error(
+        "Google authorization is no longer available. Connect Google Drive again."
+      );
+    }
+
+    await this.#ensureTokenClient();
+    try {
+      return await this.#requestAccessToken("");
+    } catch (error) {
+      error.code = error.code || "GOOGLE_AUTH_REQUIRED";
+      throw error;
+    }
+  }
+
+  /** Remove the access token from memory. */
   clearAccessToken() {
     this.accessToken = null;
+    this.accessTokenExpiresAt = 0;
 
     this.#emit({
       type: "disconnected",
     });
   }
 
-  /**
-   * Subscribe to auth state events.
-   *
-   * @param {(event: object) => void} listener
-   * @returns {() => void} unsubscribe callback
-   */
+  /** Subscribe to auth state events. */
   subscribe(listener) {
     this.listeners.add(listener);
 
@@ -94,12 +125,22 @@ export class GoogleAuth {
     };
   }
 
-  /**
-   * Connect to Google Drive using Google Identity Services.
-   *
-   * @returns {Promise<string>} access token
-   */
+  /** Connect to Google Drive using Google Identity Services. */
   async connect() {
+    const clientId = this.getClientId();
+
+    if (!clientId) {
+      throw new Error(
+        "Save your Google Web OAuth Client ID before connecting."
+      );
+    }
+
+    await this.#ensureTokenClient();
+    return this.#requestAccessToken("consent");
+  }
+
+  /** Build the GIS token client once for the current Web OAuth Client ID. */
+  async #ensureTokenClient() {
     const clientId = this.getClientId();
 
     if (!clientId) {
@@ -110,94 +151,131 @@ export class GoogleAuth {
 
     await this.#waitForGoogleIdentityServices();
 
-    return new Promise((resolve, reject) => {
-      this.tokenClient = google.accounts.oauth2.initTokenClient({
-        client_id: clientId,
-        scope: DRIVE_SCOPE,
-        include_granted_scopes: false,
+    if (this.tokenClient) {
+      return;
+    }
 
-        callback: (response) => {
-          if (response.error) {
-            this.accessToken = null;
-
-            this.#emit({
-              type: "error",
-              error: response.error,
-            });
-
-            reject(
-              new Error(
-                response.error_description ||
-                  response.error ||
-                  "Google authorization failed."
-              )
-            );
-            return;
-          }
-
-          if (!response.access_token) {
-            this.accessToken = null;
-
-            reject(
-              new Error("Google did not return an access token.")
-            );
-            return;
-          }
-
-          this.accessToken = response.access_token;
-
-          this.#emit({
-            type: "connected",
-            accessToken: this.accessToken,
-          });
-
-          resolve(this.accessToken);
-        },
-
-        error_callback: (error) => {
-          this.accessToken = null;
-
-          const message =
-            error?.message ||
-            error?.type ||
-            "Google authorization popup failed.";
-
-          this.#emit({
-            type: "error",
-            error: message,
-          });
-
-          reject(new Error(message));
-        },
-      });
-
-      try {
-        this.tokenClient.requestAccessToken({
-          prompt: "consent",
-        });
-      } catch (error) {
-        this.accessToken = null;
-        reject(error);
-      }
+    this.tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: clientId,
+      scope: DRIVE_SCOPE,
+      include_granted_scopes: false,
+      callback: (response) => {
+        this.#handleTokenResponse(response);
+      },
+      error_callback: (error) => {
+        this.#handleTokenPopupError(error);
+      },
     });
   }
 
-  /**
-   * Wait until Google Identity Services is available.
-   *
-   * The GIS script is loaded asynchronously by index.html, so a user can
-   * technically press Connect before the library has finished loading.
-   *
-   * @param {number} timeoutMs
-   * @returns {Promise<void>}
-   */
+  /** Request one access token and coalesce concurrent refresh attempts. */
+  #requestAccessToken(prompt) {
+    if (this.pendingTokenRequest) {
+      return this.pendingTokenRequest.promise;
+    }
+
+    let resolveRequest;
+    let rejectRequest;
+
+    const promise = new Promise((resolve, reject) => {
+      resolveRequest = resolve;
+      rejectRequest = reject;
+    });
+
+    this.pendingTokenRequest = {
+      promise,
+      resolve: resolveRequest,
+      reject: rejectRequest,
+    };
+
+    try {
+      this.tokenClient.requestAccessToken({ prompt });
+    } catch (error) {
+      const pending = this.pendingTokenRequest;
+      this.pendingTokenRequest = null;
+      pending?.reject(error);
+    }
+
+    return promise;
+  }
+
+  /** Handle a successful or OAuth-error GIS token callback. */
+  #handleTokenResponse(response) {
+    const pending = this.pendingTokenRequest;
+    this.pendingTokenRequest = null;
+
+    if (response?.error) {
+      this.accessToken = null;
+      this.accessTokenExpiresAt = 0;
+
+      this.#emit({
+        type: "error",
+        error: response.error,
+      });
+
+      pending?.reject(
+        new Error(
+          response.error_description ||
+            response.error ||
+            "Google authorization failed."
+        )
+      );
+      return;
+    }
+
+    if (!response?.access_token) {
+      this.accessToken = null;
+      this.accessTokenExpiresAt = 0;
+      pending?.reject(
+        new Error("Google did not return an access token.")
+      );
+      return;
+    }
+
+    const expiresInSeconds = Number(response.expires_in);
+    const lifetimeMs =
+      Number.isFinite(expiresInSeconds) && expiresInSeconds > 0
+        ? expiresInSeconds * 1000
+        : DEFAULT_TOKEN_LIFETIME_MS;
+
+    this.accessToken = response.access_token;
+    this.accessTokenExpiresAt = Date.now() + lifetimeMs;
+
+    this.#emit({
+      type: "connected",
+      accessToken: this.accessToken,
+      expiresAt: this.accessTokenExpiresAt,
+    });
+
+    pending?.resolve(this.accessToken);
+  }
+
+  /** Handle GIS popup/window failures. */
+  #handleTokenPopupError(error) {
+    const pending = this.pendingTokenRequest;
+    this.pendingTokenRequest = null;
+    this.accessToken = null;
+    this.accessTokenExpiresAt = 0;
+
+    const message =
+      error?.message ||
+      error?.type ||
+      "Google authorization popup failed.";
+
+    this.#emit({
+      type: "error",
+      error: message,
+    });
+
+    pending?.reject(new Error(message));
+  }
+
+  /** Wait until Google Identity Services is available. */
   async #waitForGoogleIdentityServices(timeoutMs = 10000) {
     const startedAt = Date.now();
 
     while (Date.now() - startedAt < timeoutMs) {
-      if (
-        window.google?.accounts?.oauth2?.initTokenClient
-      ) {
+      if (window.google?.accounts?.oauth2?.initTokenClient) {
         return;
       }
 
@@ -212,11 +290,7 @@ export class GoogleAuth {
     );
   }
 
-  /**
-   * Emit an auth event to all listeners.
-   *
-   * @param {object} event
-   */
+  /** Emit an auth event to all listeners. */
   #emit(event) {
     for (const listener of this.listeners) {
       try {
