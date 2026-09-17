@@ -12,6 +12,10 @@ const TOKEN_REFRESH_SKEW_MS = 2 * 60 * 1000;
  *
  * The Web OAuth Client ID is persisted in localStorage because it is not a
  * secret. Access tokens are deliberately kept only in page memory.
+ *
+ * GIS' browser token model does not issue refresh tokens. Google requires a
+ * user gesture to request a replacement access token after expiry, so long
+ * jobs pause at an auth gate and resume after the user clicks Continue.
  */
 export class GoogleAuth {
   constructor() {
@@ -19,6 +23,7 @@ export class GoogleAuth {
     this.accessToken = null;
     this.accessTokenExpiresAt = 0;
     this.pendingTokenRequest = null;
+    this.pendingRenewal = null;
     this.listeners = new Set();
   }
 
@@ -60,13 +65,17 @@ export class GoogleAuth {
     return this.accessTokenExpiresAt;
   }
 
+  /** Return whether a long-running job is waiting for user authorization. */
+  isRenewalRequired() {
+    return Boolean(this.pendingRenewal);
+  }
+
   /**
    * Return a token that is expected to remain valid for the next operation.
    *
-   * Long-running imports call this through the Drive service boundary. When
-   * the current token is close to expiry, GIS is asked for a new token with an
-   * empty prompt so an already-authorized Google session can continue without
-   * another consent screen.
+   * GIS' token model requires user interaction to obtain a replacement token.
+   * When the current token approaches expiry, callers wait on a shared renewal
+   * gate instead of trying to open a popup from a background async callback.
    */
   async getValidAccessToken({
     minValidityMs = TOKEN_REFRESH_SKEW_MS,
@@ -82,13 +91,15 @@ export class GoogleAuth {
       return this.accessToken;
     }
 
-    return this.refreshAccessToken();
+    return this.#waitForUserRenewal();
   }
 
   /**
-   * Force GIS to issue a fresh access token for the existing authorization.
-   * Concurrent callers share one refresh so four import workers do not open
-   * four token requests at the same time.
+   * Pause callers until the user explicitly renews Google authorization.
+   *
+   * This method intentionally does not call requestAccessToken() itself. It is
+   * used by service-layer 401 recovery and by proactive expiry checks, both of
+   * which run outside a user gesture and would otherwise be popup-blocked.
    */
   async refreshAccessToken() {
     if (!this.accessToken) {
@@ -97,19 +108,40 @@ export class GoogleAuth {
       );
     }
 
-    await this.#ensureTokenClient();
-    try {
-      return await this.#requestAccessToken("");
-    } catch (error) {
-      error.code = error.code || "GOOGLE_AUTH_REQUIRED";
-      throw error;
+    return this.#waitForUserRenewal();
+  }
+
+  /**
+   * Renew the access token from an explicit user gesture, then release every
+   * long-running worker that is waiting at the auth gate.
+   */
+  renewAccessTokenFromUserGesture() {
+    if (!this.accessToken || !this.tokenClient) {
+      throw new Error(
+        "Google authorization is no longer available. Connect Google Drive again."
+      );
     }
+
+    // Do not await anything before requestAccessToken(). Browsers may only
+    // allow the OAuth popup while the original button-click activation is
+    // still live on this synchronous call stack.
+    return this.#requestAccessToken("", "renew");
   }
 
   /** Remove the access token from memory. */
   clearAccessToken() {
     this.accessToken = null;
     this.accessTokenExpiresAt = 0;
+
+    if (this.pendingRenewal) {
+      const pending = this.pendingRenewal;
+      this.pendingRenewal = null;
+      pending.reject(
+        new Error(
+          "Google authorization was disconnected while a job was waiting to resume."
+        )
+      );
+    }
 
     this.#emit({
       type: "disconnected",
@@ -136,7 +168,7 @@ export class GoogleAuth {
     }
 
     await this.#ensureTokenClient();
-    return this.#requestAccessToken("consent");
+    return this.#requestAccessToken("consent", "connect");
   }
 
   /** Build the GIS token client once for the current Web OAuth Client ID. */
@@ -168,8 +200,36 @@ export class GoogleAuth {
     });
   }
 
-  /** Request one access token and coalesce concurrent refresh attempts. */
-  #requestAccessToken(prompt) {
+  /** Create or reuse the shared promise that pauses long-running jobs. */
+  #waitForUserRenewal() {
+    if (this.pendingRenewal) {
+      return this.pendingRenewal.promise;
+    }
+
+    let resolveRenewal;
+    let rejectRenewal;
+
+    const promise = new Promise((resolve, reject) => {
+      resolveRenewal = resolve;
+      rejectRenewal = reject;
+    });
+
+    this.pendingRenewal = {
+      promise,
+      resolve: resolveRenewal,
+      reject: rejectRenewal,
+    };
+
+    this.#emit({
+      type: "renewal-required",
+      expiresAt: this.accessTokenExpiresAt,
+    });
+
+    return promise;
+  }
+
+  /** Request one access token and coalesce concurrent interactive attempts. */
+  #requestAccessToken(prompt, purpose) {
     if (this.pendingTokenRequest) {
       return this.pendingTokenRequest.promise;
     }
@@ -186,6 +246,7 @@ export class GoogleAuth {
       promise,
       resolve: resolveRequest,
       reject: rejectRequest,
+      purpose,
     };
 
     try {
@@ -205,6 +266,22 @@ export class GoogleAuth {
     this.pendingTokenRequest = null;
 
     if (response?.error) {
+      const error = new Error(
+        response.error_description ||
+          response.error ||
+          "Google authorization failed."
+      );
+
+      if (pending?.purpose === "renew" && this.pendingRenewal) {
+        this.#emit({
+          type: "renewal-required",
+          error: error.message,
+          expiresAt: this.accessTokenExpiresAt,
+        });
+        pending.reject(error);
+        return;
+      }
+
       this.accessToken = null;
       this.accessTokenExpiresAt = 0;
 
@@ -213,22 +290,26 @@ export class GoogleAuth {
         error: response.error,
       });
 
-      pending?.reject(
-        new Error(
-          response.error_description ||
-            response.error ||
-            "Google authorization failed."
-        )
-      );
+      pending?.reject(error);
       return;
     }
 
     if (!response?.access_token) {
+      const error = new Error("Google did not return an access token.");
+
+      if (pending?.purpose === "renew" && this.pendingRenewal) {
+        this.#emit({
+          type: "renewal-required",
+          error: error.message,
+          expiresAt: this.accessTokenExpiresAt,
+        });
+        pending.reject(error);
+        return;
+      }
+
       this.accessToken = null;
       this.accessTokenExpiresAt = 0;
-      pending?.reject(
-        new Error("Google did not return an access token.")
-      );
+      pending?.reject(error);
       return;
     }
 
@@ -241,12 +322,17 @@ export class GoogleAuth {
     this.accessToken = response.access_token;
     this.accessTokenExpiresAt = Date.now() + lifetimeMs;
 
+    const renewal = this.pendingRenewal;
+    this.pendingRenewal = null;
+
     this.#emit({
       type: "connected",
       accessToken: this.accessToken,
       expiresAt: this.accessTokenExpiresAt,
+      renewed: pending?.purpose === "renew",
     });
 
+    renewal?.resolve(this.accessToken);
     pending?.resolve(this.accessToken);
   }
 
@@ -254,13 +340,24 @@ export class GoogleAuth {
   #handleTokenPopupError(error) {
     const pending = this.pendingTokenRequest;
     this.pendingTokenRequest = null;
-    this.accessToken = null;
-    this.accessTokenExpiresAt = 0;
 
     const message =
       error?.message ||
       error?.type ||
       "Google authorization popup failed.";
+
+    if (pending?.purpose === "renew" && this.pendingRenewal) {
+      this.#emit({
+        type: "renewal-required",
+        error: message,
+        expiresAt: this.accessTokenExpiresAt,
+      });
+      pending.reject(new Error(message));
+      return;
+    }
+
+    this.accessToken = null;
+    this.accessTokenExpiresAt = 0;
 
     this.#emit({
       type: "error",

@@ -68,6 +68,7 @@ const elements = {
   pickerAppId: document.getElementById("google-picker-app-id"),
   saveClientId: document.getElementById("save-client-id"),
   connectGoogle: document.getElementById("connect-google"),
+  renewGoogleAccess: document.getElementById("renew-google-access"),
   connectionStatus: document.getElementById("connection-status"),
   authMessage: document.getElementById("auth-message"),
 
@@ -278,6 +279,11 @@ function init() {
   elements.connectGoogle.addEventListener(
     "click",
     handleConnectGoogle
+  );
+
+  elements.renewGoogleAccess.addEventListener(
+    "click",
+    handleRenewGoogleAccess
   );
 
   elements.uploadDestination.addEventListener(
@@ -591,6 +597,47 @@ async function handleConnectGoogle() {
       "Connect Google Drive";
 
     setBusy(false);
+  }
+}
+
+/**
+ * Renew Google access from an explicit user gesture and resume paused jobs.
+ */
+async function handleRenewGoogleAccess() {
+  if (!googleAuth.isRenewalRequired()) {
+    elements.renewGoogleAccess.hidden = true;
+    return;
+  }
+
+  elements.renewGoogleAccess.disabled = true;
+  elements.renewGoogleAccess.textContent = "Renewing…";
+
+  try {
+    await googleAuth.renewAccessTokenFromUserGesture();
+
+    setConnectionStatus(
+      "Google Drive: Connected",
+      "connected"
+    );
+
+    setMessage(
+      elements.authMessage,
+      "Google access renewed. Resuming the current job…",
+      "success"
+    );
+  } catch (error) {
+    setMessage(
+      elements.authMessage,
+      `Could not renew Google access: ${getErrorMessage(error)}. ` +
+        "Click Continue Google Drive job to try again.",
+      "error"
+    );
+  } finally {
+    elements.renewGoogleAccess.disabled = false;
+    elements.renewGoogleAccess.textContent =
+      "Continue Google Drive job";
+    elements.renewGoogleAccess.hidden =
+      !googleAuth.isRenewalRequired();
   }
 }
 
@@ -4873,7 +4920,67 @@ function resetBatchProgress() {
  * @param {object} event
  */
 function handleAuthEvent(event) {
+  if (event.type === "renewal-required") {
+    elements.renewGoogleAccess.hidden = false;
+    elements.renewGoogleAccess.disabled = false;
+    elements.renewGoogleAccess.textContent =
+      "Continue Google Drive job";
+
+    setConnectionStatus(
+      "Google Drive: Authorization needed",
+      "error"
+    );
+
+    const detail = event.error
+      ? ` (${event.error})`
+      : "";
+
+    const renewalMessage =
+      "Google access needs renewal. The active job is paused safely. " +
+      "Click Continue Google Drive job to renew access and resume." +
+      detail;
+
+    setMessage(
+      elements.authMessage,
+      renewalMessage,
+      "error"
+    );
+
+    if (state.wholeFolderImporting || state.driveImporting) {
+      setMessage(
+        elements.driveImportMessage,
+        renewalMessage,
+        "error"
+      );
+    }
+    return;
+  }
+
+  if (event.type === "connected") {
+    elements.renewGoogleAccess.hidden = true;
+    elements.renewGoogleAccess.disabled = false;
+    elements.renewGoogleAccess.textContent =
+      "Continue Google Drive job";
+
+    if (event.renewed) {
+      setConnectionStatus(
+        "Google Drive: Connected",
+        "connected"
+      );
+
+      if (state.wholeFolderImporting || state.driveImporting) {
+        setMessage(
+          elements.driveImportMessage,
+          "Google access renewed. Resuming import…",
+          "success"
+        );
+      }
+    }
+    return;
+  }
+
   if (event.type === "disconnected") {
+    elements.renewGoogleAccess.hidden = true;
     state.storage = null;
     state.libraryBooks = [];
     state.libraryFolders = [];
@@ -4889,6 +4996,7 @@ function handleAuthEvent(event) {
   }
 
   if (event.type === "error") {
+    elements.renewGoogleAccess.hidden = true;
     state.duplicateScanController?.abort();
     state.duplicateScanController = null;
     state.duplicateScanning = false;
@@ -4965,6 +5073,11 @@ function setLocalBookPickersDisabled(disabled) {
  * Reset auth-related UI to disconnected state.
  */
 function setDisconnectedState() {
+  elements.renewGoogleAccess.hidden = true;
+  elements.renewGoogleAccess.disabled = false;
+  elements.renewGoogleAccess.textContent =
+    "Continue Google Drive job";
+
   state.duplicateScanController?.abort();
   state.duplicateScanController = null;
   state.duplicateScanning = false;
