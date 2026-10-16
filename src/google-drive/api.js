@@ -678,6 +678,7 @@ export class GoogleDriveApi {
       supportsAllDrives: "true",
       fields:
         "id,name,mimeType,size,modifiedTime," +
+        "md5Checksum,sha1Checksum,sha256Checksum," +
         "capabilities(canCopy)",
     });
 
@@ -731,7 +732,7 @@ export class GoogleDriveApi {
       supportsAllDrives: "true",
       fields:
         "id,name,mimeType,parents,appProperties," +
-        "size,modifiedTime",
+        "size,modifiedTime,md5Checksum,sha1Checksum,sha256Checksum",
     });
 
     const appProperties = {
@@ -864,7 +865,8 @@ export class GoogleDriveApi {
     };
 
     const fields =
-      "id,name,parents,appProperties,size,modifiedTime";
+      "id,name,parents,appProperties,size,modifiedTime," +
+      "md5Checksum,sha1Checksum,sha256Checksum";
 
     const params = new URLSearchParams({
       uploadType: "resumable",
@@ -925,7 +927,8 @@ export class GoogleDriveApi {
     existingFileId
   ) {
     const fields =
-      "id,name,parents,appProperties,size,modifiedTime";
+      "id,name,parents,appProperties,size,modifiedTime," +
+      "md5Checksum,sha1Checksum,sha256Checksum";
 
     const params = new URLSearchParams({
       uploadType: "resumable",

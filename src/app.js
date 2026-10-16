@@ -9,6 +9,13 @@ import { ImportPlanner } from "./imports/planner.js";
 import { ImportExecutor } from "./imports/executor.js";
 import { DuplicateScanner } from "./library/duplicate-scanner.js";
 import {
+  LibraryIndex,
+  createLibraryIndexEntry,
+} from "./library/library-index.js";
+import {
+  createLibraryIndexStore,
+} from "./library/index-store.js";
+import {
   DUPLICATE_KEEP_POLICIES,
   chooseDuplicateKeep,
   paginateDuplicateGroups,
@@ -52,9 +59,15 @@ const importPlanner = new ImportPlanner({
   libraryService,
 });
 
+const libraryIndex = new LibraryIndex({
+  store: createLibraryIndexStore(),
+});
+
 const importExecutor = new ImportExecutor({
   source: driveImportSource,
   libraryService,
+  onLibraryMutation: (mutation) =>
+    handleLibraryIndexMutation(mutation),
 });
 
 const duplicateScanner = new DuplicateScanner({
@@ -189,6 +202,8 @@ const elements = {
     document.getElementById("duplicate-group-list"),
   cleanSelectedDuplicates:
     document.getElementById("clean-selected-duplicates"),
+  rebuildLibraryIndex:
+    document.getElementById("rebuild-library-index"),
   duplicateCleanupMessage:
     document.getElementById("duplicate-cleanup-message"),
   registerFolderBooks:
@@ -227,6 +242,8 @@ const state = {
   duplicatePreviewPage: 0,
   duplicatePreviewPageSize: 20,
   duplicateCleaning: false,
+  libraryIndexReady: false,
+  libraryIndexLoading: false,
   driveSourceFolder: null,
   driveSourceFolderPicking: false,
   driveSourceBrowserFolders: [],
@@ -333,7 +350,7 @@ function init() {
 
   elements.findDuplicates.addEventListener(
     "click",
-    handleFindDuplicates
+    () => handleFindDuplicates()
   );
 
   elements.cancelDuplicateScan.addEventListener(
@@ -374,6 +391,11 @@ function init() {
   elements.cleanSelectedDuplicates.addEventListener(
     "click",
     handleCleanSelectedDuplicates
+  );
+
+  elements.rebuildLibraryIndex.addEventListener(
+    "click",
+    handleRebuildLibraryIndex
   );
 
   elements.libraryBack.addEventListener(
@@ -562,6 +584,7 @@ async function handleConnectGoogle() {
       );
 
     state.storage = storage;
+    await loadLibraryIndex(storage.books.id);
 
     setMessage(
       elements.authMessage,
@@ -2959,6 +2982,61 @@ async function handleRefreshLibrary() {
 }
 
 /**
+ * Load the persistent local library index for one KOCloud/Books root.
+ */
+async function loadLibraryIndex(rootFolderId) {
+  state.libraryIndexLoading = true;
+  try {
+    state.libraryIndexReady = await libraryIndex.load(rootFolderId);
+    return state.libraryIndexReady;
+  } catch (error) {
+    console.warn("KOCloud library index load failed:", error);
+    state.libraryIndexReady = false;
+    return false;
+  } finally {
+    state.libraryIndexLoading = false;
+  }
+}
+
+/**
+ * Apply a successful index mutation without allowing index persistence to
+ * affect the primary Drive operation.
+ */
+async function handleLibraryIndexMutation(mutation) {
+  const rootFolderId = state.storage?.books?.id;
+  if (!rootFolderId || !libraryIndex.isReady(rootFolderId)) {
+    return;
+  }
+
+  if (mutation?.type === "remove") {
+    await libraryIndex.remove(mutation.fileId);
+    return;
+  }
+
+  if (mutation?.type === "upsert" && mutation.file?.id) {
+    const entry = createLibraryIndexEntry(mutation.file, {
+      parentId: mutation.parentId,
+      parentPath: mutation.parentPath,
+      path: mutation.path,
+      isBook: mutation.isBook,
+    });
+    await libraryIndex.upsert(entry);
+  }
+}
+
+/** Force the next duplicate report to rebuild the complete index from Drive. */
+async function handleRebuildLibraryIndex() {
+  if (isDuplicateMaintenanceBusy()) {
+    return;
+  }
+
+  // Keep the last complete index until a fresh scan succeeds. Cancelling or
+  // failing a rebuild must not destroy the fast duplicate report we already
+  // have.
+  await handleFindDuplicates({ forceRebuild: true });
+}
+
+/**
  * Return whether duplicate-library maintenance is active.
  *
  * @returns {boolean}
@@ -2970,7 +3048,7 @@ function isDuplicateMaintenanceBusy() {
 /**
  * Start an exact-duplicate scan across KOCloud/Books and all subfolders.
  */
-async function handleFindDuplicates() {
+async function handleFindDuplicates({ forceRebuild = false } = {}) {
   if (
     state.busy ||
     state.libraryLoading ||
@@ -2991,6 +3069,35 @@ async function handleFindDuplicates() {
     return;
   }
 
+  if (!forceRebuild) {
+    if (!state.libraryIndexReady) {
+      await loadLibraryIndex(rootFolderId);
+    }
+
+    if (libraryIndex.isReady(rootFolderId)) {
+      const result = libraryIndex.getReport();
+      state.duplicateGroups = result.groups;
+      state.duplicateScanProgress = result;
+      state.duplicatePreviewPage = 0;
+      state.duplicateSelectedGroups = new Set(
+        result.groups.map((group) => group.id)
+      );
+      applyDuplicateKeeperPolicy();
+      const meta = result.indexMeta;
+      setMessage(
+        elements.duplicateCleanupMessage,
+        `Loaded from library index · ${result.filesScanned} files` +
+          (meta?.updatedAt
+            ? ` · updated ${new Date(meta.updatedAt).toLocaleString()}`
+            : ""),
+        "success"
+      );
+      renderDuplicateCleanup();
+      return;
+    }
+  }
+
+  const indexEntries = [];
   state.duplicateScanning = true;
   state.duplicateScanController = new AbortController();
   state.duplicateScanProgress = {
@@ -3032,7 +3139,13 @@ async function handleFindDuplicates() {
         };
         renderDuplicateCleanup();
       },
+      onFile(file, context) {
+        indexEntries.push(createLibraryIndexEntry(file, context));
+      },
     });
+
+    await libraryIndex.replaceAll(rootFolderId, indexEntries);
+    state.libraryIndexReady = true;
 
     state.duplicateGroups = result.groups;
     state.duplicateScanProgress = {
@@ -3262,6 +3375,10 @@ async function handleCleanSelectedDuplicates() {
       try {
         await libraryService.trashFile(task.file.id);
         trashedIds.add(task.file.id);
+        await handleLibraryIndexMutation({
+          type: "remove",
+          fileId: task.file.id,
+        });
       } catch {
         failed += 1;
       } finally {
@@ -3406,8 +3523,12 @@ function renderDuplicateCleanup() {
     `${duplicateCopies === 1 ? "y" : "ies"} · ` +
     `${formatBytes(reclaimableBytes)} reclaimable. ` +
     "All exact groups are selected by default. Only checksum-identical files " +
-    "are eligible; cleanup moves extra copies to Trash.";
+    "are eligible; cleanup moves extra copies to Trash." +
+    (state.libraryIndexReady
+      ? " Duplicate results are backed by the persistent library index."
+      : "");
 
+  elements.rebuildLibraryIndex.disabled = state.duplicateCleaning;
   elements.duplicateKeeperPolicy.value = state.duplicateKeeperPolicy;
   elements.duplicateKeeperPolicy.disabled = state.duplicateCleaning;
 
@@ -4492,6 +4613,23 @@ async function handleUploadAll() {
                 }
           );
         }
+
+        const uploadedName =
+          uploadedFile.name || item.driveName || driveName || item.file.name;
+        await handleLibraryIndexMutation({
+          type: "upsert",
+          file: {
+            ...uploadedFile,
+            name: uploadedName,
+            parents: [targetFolder.id],
+          },
+          parentId: targetFolder.id,
+          parentPath: [
+            getUploadDestinationPath(),
+            ...(item.directoryParts || []),
+          ].filter(Boolean).join("/"),
+          isBook: libraryService.isSupportedBook({ name: uploadedName }),
+        });
       } catch (error) {
         state.uploadTask = null;
 
@@ -5112,6 +5250,8 @@ function setDisconnectedState() {
   );
 
   state.storage = null;
+  state.libraryIndexReady = false;
+  state.libraryIndexLoading = false;
   state.libraryBooks = [];
   state.libraryFolders = [];
   state.libraryPath = [];

@@ -101,3 +101,23 @@ npm run check
 ```
 
 See [`docs/testing.md`](docs/testing.md) for the test/CI structure.
+
+## Persistent library index
+
+Duplicate detection now builds a browser-local persistent library index on the
+first full scan of `KOCloud/Books`. Later **Find duplicates** actions reuse that
+IndexedDB snapshot instead of recursively scanning the whole library again.
+
+Companion-owned mutations update a complete index immediately:
+
+- Drive imports add/rewrite copied files.
+- Local uploads add/rewrite uploaded files.
+- Duplicate cleanup removes files after they are moved to Trash.
+
+Use **Rebuild index** from the duplicate report when you need to reconcile
+changes made outside Companion. A rebuild is transactional at the application
+level: the previous complete index remains usable until the new scan finishes
+successfully.
+
+The next indexing milestone is Drive change-feed reconciliation so external
+Drive changes can be incorporated incrementally without a full rebuild.

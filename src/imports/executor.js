@@ -14,10 +14,12 @@ export class ImportExecutor {
    * @param {object} options
    * @param {object} options.source
    * @param {object} options.libraryService
+   * @param {(mutation: object) => Promise<void>|void} [options.onLibraryMutation]
    */
-  constructor({ source, libraryService }) {
+  constructor({ source, libraryService, onLibraryMutation = null }) {
     this.source = source;
     this.library = libraryService;
+    this.onLibraryMutation = onLibraryMutation;
   }
 
   /**
@@ -165,6 +167,11 @@ export class ImportExecutor {
             refreshedName,
             copiedFile
           );
+
+          await this.#notifyLibraryMutation({
+            type: "remove",
+            fileId: refreshedExisting.id,
+          });
         } else {
           book.importStatus = "done";
           book.importMessage =
@@ -178,6 +185,19 @@ export class ImportExecutor {
             copiedFile
           );
         }
+
+        await this.#notifyLibraryMutation({
+          type: "upsert",
+          file: {
+            ...sourceFile,
+            ...copiedFile,
+            name: driveName,
+            parents: [destinationFolderId],
+          },
+          parentId: destinationFolderId,
+          parentPath: destinationPath,
+          isBook: this.source.isBook?.({ name: driveName }) ?? true,
+        });
       } catch (error) {
         book.importStatus = "error";
         book.importMessage = getErrorMessage(error);
@@ -264,6 +284,7 @@ export class ImportExecutor {
           sourceFolder: plan.sourceFolder,
           destinationFolder: destinationRoot,
           path: [],
+          destinationBasePath: plan.destinationPath || "KOCloud/Books",
           ancestorIds: new Set(),
         },
         duplicatePolicy,
@@ -513,6 +534,10 @@ export class ImportExecutor {
         if (isReplace) {
           counts.replaced += 1;
           destinationEntries.filesByName.set(key, copied);
+          await this.#notifyLibraryMutation({
+            type: "remove",
+            fileId: existing.id,
+          });
         } else {
           counts.imported += 1;
           destinationEntries.filesByName.set(
@@ -520,6 +545,21 @@ export class ImportExecutor {
             copied
           );
         }
+
+        await this.#notifyLibraryMutation({
+          type: "upsert",
+          file: {
+            ...file,
+            ...copied,
+            name: driveName,
+            parents: [destinationFolder.id],
+          },
+          parentId: destinationFolder.id,
+          parentPath: [job.destinationBasePath, ...currentPath]
+            .filter(Boolean)
+            .join("/"),
+          isBook: this.source.isBook?.({ name: driveName }) ?? false,
+        });
       } catch (error) {
         if (
           error?.name === "AbortError" ||
@@ -546,6 +586,7 @@ export class ImportExecutor {
       destinationParentId: destinationFolder.id,
       destinationParentEntries: destinationEntries,
       path: currentPath,
+      destinationBasePath: job.destinationBasePath,
       ancestorIds: nextAncestorIds,
     }));
   }
@@ -908,6 +949,20 @@ export class ImportExecutor {
   /**
    * @returns {object}
    */
+  async #notifyLibraryMutation(mutation) {
+    if (typeof this.onLibraryMutation !== "function") {
+      return;
+    }
+
+    try {
+      await this.onLibraryMutation(mutation);
+    } catch (error) {
+      // Library indexing is an optimization. A persistence failure must never
+      // turn a successful Drive import into a failed import.
+      console.warn("KOCloud library index update failed:", error);
+    }
+  }
+
   #createCounts() {
     return {
       imported: 0,

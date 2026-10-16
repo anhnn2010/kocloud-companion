@@ -1,41 +1,11 @@
+import {
+  createExactFingerprint,
+  normalizeFileSize,
+} from "./fingerprint.js";
+
+export { createExactFingerprint } from "./fingerprint.js";
+
 const DEFAULT_FOLDER_CONCURRENCY = 4;
-
-function normalizeSize(value) {
-  const size = Number(value);
-  return Number.isFinite(size) && size >= 0 ? size : null;
-}
-
-function checksumFor(file) {
-  if (file?.sha256Checksum) {
-    return ["sha256", file.sha256Checksum];
-  }
-  if (file?.sha1Checksum) {
-    return ["sha1", file.sha1Checksum];
-  }
-  if (file?.md5Checksum) {
-    return ["md5", file.md5Checksum];
-  }
-  return null;
-}
-
-/**
- * Build a stable exact-content fingerprint from Drive metadata.
- * Returns null when Drive did not expose a content checksum.
- *
- * @param {object} file
- * @returns {string|null}
- */
-export function createExactFingerprint(file) {
-  const checksum = checksumFor(file);
-  const size = normalizeSize(file?.size);
-
-  if (!checksum || size === null) {
-    return null;
-  }
-
-  const [algorithm, value] = checksum;
-  return `${algorithm}:${value}:${size}`;
-}
 
 function joinPath(parentPath, name) {
   return parentPath ? `${parentPath}/${name}` : name;
@@ -46,7 +16,7 @@ function compactFile(file, path) {
     id: file.id,
     name: file.name || "Untitled",
     path,
-    size: normalizeSize(file.size) ?? 0,
+    size: normalizeFileSize(file.size) ?? 0,
     modifiedTime: file.modifiedTime || "",
     mimeType: file.mimeType || "",
   };
@@ -107,6 +77,7 @@ export class DuplicateScanner {
    * @param {string} [options.rootPath]
    * @param {AbortSignal|null} [options.signal]
    * @param {(progress: object) => void} [options.onProgress]
+   * @param {(file: object, context: object) => void} [options.onFile]
    * @returns {Promise<object>}
    */
   async scan({
@@ -114,6 +85,7 @@ export class DuplicateScanner {
     rootPath = "Books",
     signal = null,
     onProgress = () => {},
+    onFile = () => {},
   }) {
     if (!rootFolderId) {
       throw new Error("A library root folder is required.");
@@ -214,6 +186,12 @@ export class DuplicateScanner {
 
         for (const file of entries.files || []) {
           progress.filesScanned += 1;
+
+          onFile(file, {
+            parentId: folder.id,
+            parentPath: folder.path,
+            isBook: this.libraryService.isSupportedBook(file),
+          });
 
           if (!this.libraryService.isSupportedBook(file)) {
             continue;
