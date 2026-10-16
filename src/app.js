@@ -3084,12 +3084,16 @@ async function handleFindDuplicates({ forceRebuild = false } = {}) {
       );
       applyDuplicateKeeperPolicy();
       const meta = result.indexMeta;
+      const indexStatus =
+        `Library index · ${result.filesScanned} files` +
+        (meta?.updatedAt
+          ? ` · updated ${new Date(meta.updatedAt).toLocaleString()}`
+          : "");
       setMessage(
         elements.duplicateCleanupMessage,
-        `Loaded from library index · ${result.filesScanned} files` +
-          (meta?.updatedAt
-            ? ` · updated ${new Date(meta.updatedAt).toLocaleString()}`
-            : ""),
+        result.groups.length === 0
+          ? `No exact duplicate books found. ${indexStatus}`
+          : `Loaded from ${indexStatus.toLowerCase()}`,
         "success"
       );
       renderDuplicateCleanup();
